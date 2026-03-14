@@ -7,6 +7,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder # Добавили строитель клавиатур
 
 # --- НАСТРОЙКИ ---
 TOKEN = "8513147127:AAEkzGMP5fcZvhq9Y7KZZRzK5WTe-2QkgjM"
@@ -42,19 +43,13 @@ def get_or_create_user(user_id, name, username=""):
     conn.commit()
     conn.close()
 
-# УМНЫЙ ПОИСК (Ищет по нику, ID и просто по ИМЕНИ)
 def resolve_user(search_query):
     conn = sqlite3.connect("svahuilsk.db")
     clean_input = str(search_query).replace("@", "").strip()
     
-    # 1. Ищем по @username
     res = conn.execute("SELECT user_id, name FROM citizens WHERE username = ? COLLATE NOCASE", (clean_input,)).fetchone()
-    
-    # 2. Если не нашли, ищем по ID (если ввели цифры)
     if not res and clean_input.isdigit():
         res = conn.execute("SELECT user_id, name FROM citizens WHERE user_id = ?", (int(clean_input),)).fetchone()
-        
-    # 3. Если опять не нашли, ищем по обычному Имени из Telegram
     if not res:
         res = conn.execute("SELECT user_id, name FROM citizens WHERE name = ? COLLATE NOCASE", (clean_input,)).fetchone()
         
@@ -144,23 +139,17 @@ async def back_to_menu(callback: CallbackQuery):
     mention = f'<a href="tg://user?id={callback.from_user.id}">{rp_name}</a>'
     await callback.message.edit_text(f"🏛 <b>Главное меню гражданина {mention}:</b>", reply_markup=main_menu_kb(), parse_mode="HTML")
 
-# --- КОМАНДА РАДАР (ДЛЯ АДМИНОВ) ---
 @dp.message(Command("users"))
 async def show_all_users(message: Message):
     if message.from_user.id not in ADMINS: return
-    
     conn = sqlite3.connect("svahuilsk.db")
     users = conn.execute("SELECT user_id, name, username FROM citizens").fetchall()
     conn.close()
-
-    if not users:
-        return await message.answer("⚠️ База данных абсолютно пуста. В группе никто не пишет сообщения.")
-
+    if not users: return await message.answer("⚠️ База данных абсолютно пуста.")
     text = "👥 <b>Жители в картотеке Свахуильска:</b>\n\n"
     for uid, name, uname in users:
         un = f"(@{uname})" if uname else "(Нет @ника)"
         text += f"• <b>{name}</b> {un} — ID: <code>{uid}</code>\n"
-
     await message.answer(text, parse_mode="HTML")
 
 # --- 🪪 ПАСПОРТ И РОЗЫСК ---
@@ -194,7 +183,6 @@ async def show_wanted(callback: CallbackQuery):
     conn = sqlite3.connect("svahuilsk.db")
     criminals = conn.execute("SELECT username, reason FROM wanted").fetchall()
     conn.close()
-
     text = "🚓 <b>БАЗА ФЕДЕРАЛЬНОГО РОЗЫСКА:</b>\n\n"
     for w_name, w_reason in criminals: text += f"🔴 <b>{w_name}</b>\n<i>Причина: {w_reason}</i>\n\n"
     if not criminals: text += "✅ На данный момент преступников в розыске нет."
@@ -233,7 +221,6 @@ async def report_send(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🔇 Мут 1 час", callback_data=f"fastmod_mute_{data['target_id']}"), InlineKeyboardButton(text="⛔️ Бан", callback_data=f"fastmod_ban_{data['target_id']}")],
         [InlineKeyboardButton(text="🟢 Закрыть жалобу", callback_data="fastmod_close")]
     ])
-
     for admin in ADMINS:
         try: await bot.send_message(admin, f"🚨 <b>НОВАЯ ЖАЛОБА!</b>\nОт: {sender_mention}\nНа: {target_mention}\n\n<b>Причина:</b> {message.text}", reply_markup=kb, parse_mode="HTML")
         except: pass
@@ -245,7 +232,6 @@ async def report_send(message: Message, state: FSMContext):
 async def fast_mod_action(callback: CallbackQuery):
     action = callback.data.split("_")[1]
     if action == "close": return await callback.message.edit_text(callback.message.html_text + "\n\n<i>✅ Жалоба закрыта.</i>", parse_mode="HTML")
-
     target_id = int(callback.data.split("_")[2])
     group_id = get_group_id()
     if not group_id: return await callback.answer("❌ Бот не знает ID группы!", show_alert=True)
@@ -263,10 +249,8 @@ async def fast_mod_action(callback: CallbackQuery):
 @dp.message(F.text.lower() == "брак")
 async def propose_marriage(message: Message):
     if not message.reply_to_message: return await message.answer("⚠️ Чтобы сделать предложение, ответьте на сообщение человека словом «брак»!")
-    
     u1_id, u2_id = message.from_user.id, message.reply_to_message.from_user.id
     if u1_id == u2_id: return await message.answer("Вы не можете жениться на самом себе!")
-
     get_or_create_user(u1_id, message.from_user.first_name, message.from_user.username)
     get_or_create_user(u2_id, message.reply_to_message.from_user.first_name, message.reply_to_message.from_user.username)
 
@@ -280,7 +264,6 @@ async def marry_no(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("marryyes_"))
 async def marry_yes(callback: CallbackQuery):
     if str(callback.from_user.id) != callback.data.split("_")[2]: return await callback.answer("Это предложение не вам!", show_alert=True)
-    
     _, u1_id, u2_id = callback.data.split("_")
     conn = sqlite3.connect("svahuilsk.db")
     conn.execute("INSERT INTO marriages (user1_id, user2_id) VALUES (?, ?)", (u1_id, u2_id))
@@ -289,7 +272,6 @@ async def marry_yes(callback: CallbackQuery):
     conn.close()
 
     await callback.message.edit_text("💍 Согласие получено! Запрос отправлен властям на регистрацию.")
-
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏛 Одобрить брак", callback_data=f"adminmarry_{m_id}")]])
     for admin in ADMINS:
         try: await bot.send_message(admin, f"💍 <b>Запрос на брак!</b>\nЖители {u1_id} и {u2_id} хотят пожениться.", reply_markup=kb, parse_mode="HTML")
@@ -303,10 +285,8 @@ async def admin_approve_marriage(callback: CallbackQuery):
     if not m:
         conn.close()
         return await callback.answer("Брак не найден.")
-
     u1_id, u2_id = m
     conn.execute("DELETE FROM marriages WHERE id = ?", (m_id,))
-    
     date = datetime.now().strftime("%d.%m.%Y")
     conn.execute("DELETE FROM passport_fields WHERE user_id = ? AND field_name = 'Брак'", (u1_id,))
     conn.execute("DELETE FROM passport_fields WHERE user_id = ? AND field_name = 'Брак'", (u2_id,))
@@ -448,7 +428,6 @@ async def ask_recognize_status(message: Message, state: FSMContext):
 async def finish_recognize(message: Message, state: FSMContext):
     data = await state.get_data()
     group_id = get_group_id()
-
     if group_id:
         try:
             await bot.send_message(group_id, f"🏛 <b>ОФИЦИАЛЬНОЕ ЗАЯВЛЕНИЕ!</b>\n\nАдминистрация Свахуильска признаёт гражданина <a href='tg://user?id={data['target_id']}'>{get_user_name(data['target_id'])}</a> как: <b>{message.text}</b>!", parse_mode="HTML")
@@ -493,15 +472,31 @@ async def finish_wanted(message: Message, state: FSMContext):
     await message.answer("✅ Объявлен в розыск!")
     await state.clear()
 
-# --- 🪪 ПАСПОРТ ---
-def get_passport_edit_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Имя", callback_data="passbtn_Имя"), InlineKeyboardButton(text="Фамилия", callback_data="passbtn_Фамилия")],
-        [InlineKeyboardButton(text="Отчество", callback_data="passbtn_Отчество"), InlineKeyboardButton(text="Район", callback_data="passbtn_Район")],
-        [InlineKeyboardButton(text="Профессия", callback_data="passbtn_Профессия"), InlineKeyboardButton(text="Брак", callback_data="passbtn_Брак")],
-        [InlineKeyboardButton(text="Награды", callback_data="passbtn_Награды"), InlineKeyboardButton(text="➕ Свое поле", callback_data="passbtn_custom")],
-        [InlineKeyboardButton(text="✅ Завершить", callback_data="cancel")]
-    ])
+# --- 🪪 ДИНАМИЧЕСКАЯ КЛАВИАТУРА ПАСПОРТА ---
+def get_passport_edit_kb(target_id):
+    builder = InlineKeyboardBuilder()
+    
+    # Стандартные кнопки (Заменили "Район" на "Прописка")
+    std_fields = ["Имя", "Фамилия", "Отчество", "Прописка", "Профессия", "Брак", "Награды"]
+    for f in std_fields:
+        builder.button(text=f, callback_data=f"passbtn_{f}")
+        
+    # Ищем кастомные поля юзера в базе
+    conn = sqlite3.connect("svahuilsk.db")
+    custom_fields = conn.execute("SELECT DISTINCT field_name FROM passport_fields WHERE user_id = ?", (target_id,)).fetchall()
+    conn.close()
+    
+    # Добавляем кнопки для уникальных полей этого жителя
+    for (f_name,) in custom_fields:
+        if f_name not in std_fields:
+            cb_data = f"passbtn_{f_name}"[:64] # Ограничение Telegram
+            builder.button(text=f"⚙️ {f_name}", callback_data=cb_data)
+
+    builder.button(text="➕ Свое поле", callback_data="passbtn_custom")
+    builder.button(text="✅ Завершить", callback_data="cancel")
+    
+    builder.adjust(2) # Выстраиваем кнопки по 2 в ряд
+    return builder.as_markup()
 
 @dp.callback_query(F.data == "admin_edit_pass")
 async def req_pass_target(callback: CallbackQuery, state: FSMContext):
@@ -522,8 +517,10 @@ async def show_pass_fields(message: Message, state: FSMContext):
         msgs.append(msg.message_id)
         return await state.update_data(msgs_to_del=msgs)
 
-    await state.update_data(target_id=user_data[0])
-    msg = await message.answer(f"Паспорт: <b>{get_user_name(user_data[0])}</b>\nПоле:", reply_markup=get_passport_edit_kb(), parse_mode="HTML")
+    target_id = user_data[0]
+    await state.update_data(target_id=target_id)
+    
+    msg = await message.answer(f"Паспорт: <b>{get_user_name(target_id)}</b>\nПоле:", reply_markup=get_passport_edit_kb(target_id), parse_mode="HTML")
     msgs.append(msg.message_id)
     await state.update_data(msgs_to_del=msgs)
     await state.set_state(AppFSM.pass_field_selection)
@@ -578,7 +575,7 @@ async def save_pass(message: Message, state: FSMContext):
         try: await bot.delete_message(message.chat.id, m_id)
         except: pass
         
-    msg = await message.answer(f"✅ Готово: <b>{field}</b>\nЧто еще для <b>{get_user_name(target_id)}</b>?", reply_markup=get_passport_edit_kb(), parse_mode="HTML")
+    msg = await message.answer(f"✅ Готово: <b>{field}</b>\nЧто еще для <b>{get_user_name(target_id)}</b>?", reply_markup=get_passport_edit_kb(target_id), parse_mode="HTML")
     await state.update_data(msgs_to_del=[msg.message_id])
     await state.set_state(AppFSM.pass_field_selection)
 
@@ -639,7 +636,7 @@ async def catch_all(message: Message):
 
 async def main():
     init_db()
-    print("Свахуильск V6.4 Запущен! Команда /users доступна.")
+    print("Свахуильск V6.5 Запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
