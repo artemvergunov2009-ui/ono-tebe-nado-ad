@@ -84,7 +84,7 @@ class AppFSM(StatesGroup):
     wanted_reason = State()
     report_target = State()
     report_reason = State()
-    fire_target = State() # Новое состояние для увольнения
+    fire_target = State()
 
 def get_cancel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]])
@@ -107,9 +107,11 @@ def main_menu_kb():
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]])
 
-def get_reply_kb(user_id):
+# УМНАЯ КЛАВИАТУРА: Понимает, где находится пользователь
+def get_reply_kb(user_id, chat_type):
     buttons = [[KeyboardButton(text="🏛 Меню Свахуильска")]]
-    if user_id in ADMINS:
+    # Кнопка панели властей появляется ТОЛЬКО у админов и ТОЛЬКО в ЛС бота (private)
+    if user_id in ADMINS and chat_type == "private":
         buttons.append([KeyboardButton(text="⚙️ Панель Властей")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -117,13 +119,16 @@ def get_reply_kb(user_id):
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
-    await message.answer("Свахуильск приветствует вас!", reply_markup=get_reply_kb(message.from_user.id))
+    await message.answer("Свахуильск приветствует вас!", reply_markup=get_reply_kb(message.from_user.id, message.chat.type))
 
+@dp.message(Command("menu"))
 @dp.message(F.text == "🏛 Меню Свахуильска")
 async def show_menu(message: Message):
     get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
     rp_name = get_user_name(message.from_user.id)
     mention = f'<a href="tg://user?id={message.from_user.id}">{rp_name}</a>'
+    
+    # Обновляем клавиатуру на случай, если у админа залагали кнопки из ЛС
     await message.answer(f"🏛 <b>Главное меню гражданина {mention}:</b>", reply_markup=main_menu_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "back_to_menu")
@@ -686,7 +691,7 @@ async def catch_all(message: Message):
 
 async def main():
     init_db()
-    print("Свахуильск V6.2 Запущен!")
+    print("Свахуильск V6.3 Запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
