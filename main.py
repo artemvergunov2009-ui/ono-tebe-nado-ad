@@ -7,7 +7,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder # Добавили строитель клавиатур
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # --- НАСТРОЙКИ ---
 TOKEN = "8513147127:AAEkzGMP5fcZvhq9Y7KZZRzK5WTe-2QkgjM"
@@ -75,6 +75,28 @@ def get_user_name(user_id):
 
     tg_name = tg_name_res[0] if tg_name_res else f"ID {user_id}"
     return " ".join(parts) if parts else tg_name
+
+def generate_passport_text(user_id):
+    """Генерирует текст паспорта для предпросмотра админам и для меню"""
+    rp_name = get_user_name(user_id)
+    conn = sqlite3.connect("svahuilsk.db")
+    fields = conn.execute("SELECT field_name, field_value FROM passport_fields WHERE user_id = ?", (user_id,)).fetchall()
+    conn.close()
+
+    mention = f'<a href="tg://user?id={user_id}">{rp_name}</a>'
+    text = f"🪪 <b>Паспорт Свахуильца</b>\n\n👤 <b>ФИО:</b> {mention}\n"
+    exclude_fields = ["Имя", "Фамилия", "Отчество"]
+    added_any = False
+    
+    for f_name, f_val in fields:
+        if f_name not in exclude_fields:
+            text += f"🔹 <b>{f_name}:</b> {f_val}\n"
+            added_any = True
+            
+    if not added_any and len(fields) <= len(exclude_fields):
+        text += "<i>Остальные данные еще не заполнены.</i>"
+        
+    return text
 
 # --- СОСТОЯНИЯ (FSM) ---
 class AppFSM(StatesGroup):
@@ -157,25 +179,7 @@ async def show_all_users(message: Message):
 async def show_passport(callback: CallbackQuery):
     u_id = callback.from_user.id
     get_or_create_user(u_id, callback.from_user.first_name, callback.from_user.username)
-    
-    rp_name = get_user_name(u_id)
-    conn = sqlite3.connect("svahuilsk.db")
-    fields = conn.execute("SELECT field_name, field_value FROM passport_fields WHERE user_id = ?", (u_id,)).fetchall()
-    conn.close()
-
-    mention = f'<a href="tg://user?id={u_id}">{rp_name}</a>'
-    text = f"🪪 <b>Паспорт Свахуильца</b>\n\n👤 <b>ФИО:</b> {mention}\n"
-    exclude_fields = ["Имя", "Фамилия", "Отчество"]
-    added_any = False
-    
-    for f_name, f_val in fields:
-        if f_name not in exclude_fields:
-            text += f"🔹 <b>{f_name}:</b> {f_val}\n"
-            added_any = True
-            
-    if not added_any and len(fields) <= len(exclude_fields):
-        text += "<i>Остальные данные еще не заполнены властями.</i>"
-    
+    text = generate_passport_text(u_id)
     await callback.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "wanted_list")
@@ -251,6 +255,7 @@ async def propose_marriage(message: Message):
     if not message.reply_to_message: return await message.answer("⚠️ Чтобы сделать предложение, ответьте на сообщение человека словом «брак»!")
     u1_id, u2_id = message.from_user.id, message.reply_to_message.from_user.id
     if u1_id == u2_id: return await message.answer("Вы не можете жениться на самом себе!")
+
     get_or_create_user(u1_id, message.from_user.first_name, message.from_user.username)
     get_or_create_user(u2_id, message.reply_to_message.from_user.first_name, message.reply_to_message.from_user.username)
 
@@ -476,26 +481,22 @@ async def finish_wanted(message: Message, state: FSMContext):
 def get_passport_edit_kb(target_id):
     builder = InlineKeyboardBuilder()
     
-    # Стандартные кнопки (Заменили "Район" на "Прописка")
     std_fields = ["Имя", "Фамилия", "Отчество", "Прописка", "Профессия", "Брак", "Награды"]
     for f in std_fields:
         builder.button(text=f, callback_data=f"passbtn_{f}")
         
-    # Ищем кастомные поля юзера в базе
     conn = sqlite3.connect("svahuilsk.db")
     custom_fields = conn.execute("SELECT DISTINCT field_name FROM passport_fields WHERE user_id = ?", (target_id,)).fetchall()
     conn.close()
     
-    # Добавляем кнопки для уникальных полей этого жителя
     for (f_name,) in custom_fields:
         if f_name not in std_fields:
-            cb_data = f"passbtn_{f_name}"[:64] # Ограничение Telegram
+            cb_data = f"passbtn_{f_name}"[:64]
             builder.button(text=f"⚙️ {f_name}", callback_data=cb_data)
 
     builder.button(text="➕ Свое поле", callback_data="passbtn_custom")
     builder.button(text="✅ Завершить", callback_data="cancel")
-    
-    builder.adjust(2) # Выстраиваем кнопки по 2 в ряд
+    builder.adjust(2)
     return builder.as_markup()
 
 @dp.callback_query(F.data == "admin_edit_pass")
@@ -520,14 +521,19 @@ async def show_pass_fields(message: Message, state: FSMContext):
     target_id = user_data[0]
     await state.update_data(target_id=target_id)
     
-    msg = await message.answer(f"Паспорт: <b>{get_user_name(target_id)}</b>\nПоле:", reply_markup=get_passport_edit_kb(target_id), parse_mode="HTML")
+    # LIVE VIEW ПАСПОРТА
+    pass_text = generate_passport_text(target_id)
+    msg = await message.answer(f"{pass_text}\n\n👇 <b>Выберите поле для изменения:</b>", reply_markup=get_passport_edit_kb(target_id), parse_mode="HTML")
+    
     msgs.append(msg.message_id)
     await state.update_data(msgs_to_del=msgs)
     await state.set_state(AppFSM.pass_field_selection)
 
 @dp.callback_query(F.data.startswith("passbtn_"))
 async def process_pass_btn(callback: CallbackQuery, state: FSMContext):
-    field = callback.data.split("_")[1]
+    # Теперь мы заменяем только 'passbtn_', чтобы не сломать названия полей с пробелами или дефисами
+    field = callback.data.replace("passbtn_", "", 1)
+    
     data = await state.get_data()
     msgs = data.get('msgs_to_del', [])
 
@@ -551,8 +557,12 @@ async def custom_field_name(message: Message, state: FSMContext):
     data = await state.get_data()
     msgs = data.get('msgs_to_del', [])
     msgs.append(message.message_id)
-    await state.update_data(field=message.text)
-    msg = await message.answer(f"ЗНАЧЕНИЕ для: <b>{message.text}</b>:", reply_markup=get_cancel_kb(), parse_mode="HTML")
+    
+    # Защита от случайных пробелов
+    field_clean = message.text.strip()
+    
+    await state.update_data(field=field_clean)
+    msg = await message.answer(f"ЗНАЧЕНИЕ для: <b>{field_clean}</b>:", reply_markup=get_cancel_kb(), parse_mode="HTML")
     msgs.append(msg.message_id)
     await state.update_data(msgs_to_del=msgs)
     await state.set_state(AppFSM.pass_value)
@@ -563,7 +573,9 @@ async def save_pass(message: Message, state: FSMContext):
     msgs = data.get('msgs_to_del', [])
     msgs.append(message.message_id)
 
-    target_id, field, value = data.get('target_id'), data.get('field'), message.text
+    target_id = data.get('target_id')
+    field = data.get('field')
+    value = message.text.strip()
 
     conn = sqlite3.connect("svahuilsk.db")
     conn.execute("DELETE FROM passport_fields WHERE user_id = ? AND field_name = ?", (target_id, field))
@@ -575,7 +587,10 @@ async def save_pass(message: Message, state: FSMContext):
         try: await bot.delete_message(message.chat.id, m_id)
         except: pass
         
-    msg = await message.answer(f"✅ Готово: <b>{field}</b>\nЧто еще для <b>{get_user_name(target_id)}</b>?", reply_markup=get_passport_edit_kb(target_id), parse_mode="HTML")
+    # LIVE VIEW ОБНОВЛЕННОГО ПАСПОРТА
+    pass_text = generate_passport_text(target_id)
+    msg = await message.answer(f"✅ Успешно {'удалено' if value == '-' else 'записано'}: <b>{field}</b>\n\n{pass_text}\n\n👇 <b>Что еще изменить?</b>", reply_markup=get_passport_edit_kb(target_id), parse_mode="HTML")
+    
     await state.update_data(msgs_to_del=[msg.message_id])
     await state.set_state(AppFSM.pass_field_selection)
 
@@ -636,7 +651,7 @@ async def catch_all(message: Message):
 
 async def main():
     init_db()
-    print("Свахуильск V6.5 Запущен!")
+    print("Свахуильск V6.6 Запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
