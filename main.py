@@ -3,7 +3,6 @@ import re
 import requests
 from io import BytesIO
 from PIL import Image
-from dotenv import load_dotenv
 
 import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
