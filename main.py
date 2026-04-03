@@ -11,7 +11,6 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from vk_api.utils import get_random_id
 
 import google.generativeai as genai
-from google.api_core.exceptions import GoogleAPIError
 
 # === ⚙️ ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
 load_dotenv()
@@ -19,7 +18,6 @@ load_dotenv()
 VK_TOKEN = os.getenv('VK_TOKEN')
 VK_GROUP_ID = os.getenv('VK_GROUP_ID')
 
-# Парсим ключи в список (можно указать хоть 10 штук через запятую в .env)
 gemini_keys_str = os.getenv('GEMINI_API_KEYS', '')
 GEMINI_API_KEYS = [key.strip() for key in gemini_keys_str.split(',') if key.strip()]
 
@@ -34,6 +32,19 @@ else:
 
 if not VK_TOKEN or not VK_GROUP_ID or not GEMINI_API_KEYS:
     raise ValueError("❌ Ошибка: Убедитесь, что VK_TOKEN, VK_GROUP_ID и GEMINI_API_KEYS указаны в .env!")
+
+# === 🤖 СПИСОК МОДЕЛЕЙ (СТРОГИЙ ПОРЯДОК ПЕРЕБОРА) ===
+MODELS = [
+    "gemini-3.1-pro-preview", 
+    "gemini-3-flash-preview", 
+    "gemini-3.1-flash-lite", 
+    "gemini-2.5-pro", 
+    "gemini-2.5-flash", 
+    "gemini-2.5-flash-lite", 
+    "gemini-2.0-flash",
+    "gemini-1.5-pro", 
+    "gemini-1.5-flash"
+]
 
 # === 🧠 СИСТЕМНЫЕ ПРОМПТЫ ===
 MODES = {
@@ -92,39 +103,42 @@ def get_image_from_attachment(attachment):
             return Image.open(BytesIO(response.content))
     return None
 
-# === 🛡️ ЯДРО ИИ С КАСКАДНЫМ ПЕРЕКЛЮЧЕНИЕМ ТОКЕНОВ ===
+# === 🛡️ ДВОЙНОЕ ЯДРО ИИ: КАСКАД ТОКЕНОВ И МОДЕЛЕЙ ===
 
 def generate_with_fallback(contents, user_mode: str) -> str:
     """
-    Пытается сгенерировать ответ, перебирая все доступные API-ключи.
-    Возвращает текст ответа или None, если ВСЕ ключи не сработали.
+    Двойной перебор: перебирает токены, а внутри каждого токена перебирает список моделей.
     """
     system_instruction = MODES.get(user_mode, MODES["fast"])
 
-    for idx, api_key in enumerate(GEMINI_API_KEYS):
-        try:
-            # Настраиваем библиотеку на текущий ключ из цикла
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(
-                model_name="gemini-1.5-flash",
-                system_instruction=system_instruction
-            )
-            
-            # Пытаемся получить ответ
-            response = model.generate_content(contents)
-            
-            # Если ответ получен, возвращаем очищенный текст
-            if response.text:
-                print(f"[✅] Успех! Сработал токен №{idx + 1}")
-                return clean_markdown(response.text)
+    for token_idx, api_key in enumerate(GEMINI_API_KEYS):
+        # Настраиваем API на текущий токен
+        genai.configure(api_key=api_key)
+        
+        for model_name in MODELS:
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_instruction
+                )
                 
-        except Exception as e:
-            # Если словили ошибку (лимит, бан ключа, ошибка сети)
-            print(f"[⚠️] Ошибка на токене №{idx + 1}: {e}. Переключаюсь на следующий...")
-            continue # Идем к следующему ключу в списке
+                # Пытаемся получить ответ
+                response = model.generate_content(contents)
+                
+                if response.text:
+                    print(f"[✅] Успех! Токен №{token_idx + 1} | Модель: {model_name}")
+                    return clean_markdown(response.text)
+                    
+            except Exception as e:
+                # Ошибка конкретной модели на этом токене
+                print(f"[⚠️] Ошибка (Токен №{token_idx + 1} | Модель {model_name}): {e}. Переключаюсь на следующую модель...")
+                continue
+                
+        # Если ни одна модель не сработала на текущем токене
+        print(f"[❌] Все {len(MODELS)} моделей на токене №{token_idx + 1} выдали ошибку. Переключаюсь на следующий токен...")
             
-    # Если цикл завершился и ни один ключ не вернул ответ
-    print("[❌] КРИТИЧЕСКАЯ ОШИБКА: Ни один токен из пула не сработал!")
+    # Если цикл завершился и вообще ничего не сработало
+    print("[☠️] КРИТИЧЕСКАЯ ОШИБКА: Ни один токен и ни одна модель не сработали!")
     return None
 
 # === 🚀 ОСНОВНАЯ ЛОГИКА БОТА ===
@@ -134,7 +148,7 @@ def main():
     vk = vk_session.get_api()
     longpoll = VkBotLongPoll(vk_session, group_id=VK_GROUP_ID)
     
-    print(f"[✅] Бот запущен! Загружено токенов Gemini: {len(GEMINI_API_KEYS)}")
+    print(f"[✅] Бот запущен! Токенов: {len(GEMINI_API_KEYS)} | Моделей в пуле: {len(MODELS)}")
 
     for event in longpoll.listen():
         if event.type == VkBotEventType.MESSAGE_NEW:
@@ -178,17 +192,15 @@ def main():
             if not content_to_send:
                 continue
 
-            # === ЗАПУСК БРОНЕБОЙНОЙ ГЕНЕРАЦИИ ===
+            # === ЗАПУСК ДВОЙНОЙ ГЕНЕРАЦИИ ===
             current_mode = user_states[user_id]
             final_response = generate_with_fallback(content_to_send, current_mode)
 
             if final_response:
-                # Если хоть один токен сработал
                 vk.messages.send(user_id=user_id, random_id=get_random_id(), message=final_response, keyboard=create_keyboard())
             else:
-                # Если ВСЕ токены упали
                 error_msg = (
-                    "Техническая ошибка: серверы перегружены или исчерпаны лимиты запросов на всех узлах.\n\n"
+                    "Техническая ошибка: серверы перегружены или исчерпаны лимиты запросов на всех узлах и моделях.\n\n"
                     "Пожалуйста, подождите немного или обратитесь к администратору."
                 )
                 vk.messages.send(user_id=user_id, random_id=get_random_id(), message=error_msg, keyboard=create_keyboard())
