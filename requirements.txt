@@ -2,3 +2,4 @@ vk_api
 google-generativeai
 requests
 Pillow
+python-dotenv
