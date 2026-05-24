@@ -65,6 +65,14 @@ def get_registration_keyboard():
     keyboard.add_button('⚙️ Сбросить', color=VkKeyboardColor.SECONDARY)
     return keyboard.get_keyboard()
 
+def get_gender_keyboard():
+    keyboard = VkKeyboard(one_time=True)
+    keyboard.add_button('Мужской 👨', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Женский 👩', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('⚙️ Сбросить', color=VkKeyboardColor.SECONDARY)
+    return keyboard.get_keyboard()
+
 def get_main_keyboard(user_id):
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('🔥 Новый день', color=VkKeyboardColor.POSITIVE)
@@ -149,7 +157,7 @@ def generate_ai_response(prompt_data):
 
 def get_user_profile_text(user_data):
     return f"""
-    Имя: {user_data.get('name')} | Возраст: {user_data.get('age')} | Рост: {user_data.get('height')} | Вес: {user_data.get('weight')}
+    Имя: {user_data.get('name')} | Пол: {user_data.get('gender')} | Возраст: {user_data.get('age')} | Рост: {user_data.get('height')} | Вес: {user_data.get('weight')}
     Цель: {user_data.get('q_0')} | Результат: {user_data.get('q_1')} кг
     Место: {user_data.get('q_2')} | Опыт: {user_data.get('q_3')} | Дней: {user_data.get('q_4')}
     Здоровье: {user_data.get('q_5')} | Аллергии: {user_data.get('q_6')}
@@ -261,10 +269,18 @@ def vk_bot_loop():
                             continue
 
                         data = users_state[user_id].get("data", {})
+                        
+                        # --- ОБНОВЛЕННАЯ ЦЕПОЧКА РЕГИСТРАЦИИ ---
                         if step == "name":
                             data["name"] = raw_text
+                            users_state[user_id]["step"] = "gender"
+                            send_message(user_id, f"Отлично, {raw_text}! Укажи свой пол:", keyboard=get_gender_keyboard())
+                        elif step == "gender":
+                            # Очищаем эмодзи из текста, если пользователь нажал кнопку
+                            clean_gender = raw_text.replace("👨", "").replace("👩", "").strip()
+                            data["gender"] = clean_gender
                             users_state[user_id]["step"] = "age"
-                            send_message(user_id, f"Отлично, {raw_text}! Сколько тебе лет?", keyboard=get_registration_keyboard())
+                            send_message(user_id, "Принято! Сколько тебе лет?", keyboard=get_registration_keyboard())
                         elif step == "age":
                             data["age"] = raw_text
                             users_state[user_id]["step"] = "height"
@@ -277,6 +293,8 @@ def vk_bot_loop():
                             data["weight"] = raw_text
                             users_state[user_id]["step"] = "q_0"
                             send_message(user_id, "Супер. Перейдем к целям.\n\n" + SURVEY_QUESTIONS[0], keyboard=get_registration_keyboard())
+                        # ----------------------------------------
+                        
                         elif step.startswith("q_"):
                             q_index = int(step.split("_")[1])
                             data[f"q_{q_index}"] = raw_text
@@ -292,7 +310,7 @@ def vk_bot_loop():
                                 users_db[user_id]["last_day_date"] = ""
                                 users_db[user_id]["history"] = ""
                                 
-                                prompt = f"ДОСЬЕ: {get_user_profile_text(data)}. Напиши краткое приветствие, оцени реалистичность цели и дай пару базовых советов."
+                                prompt = f"ДОСЬЕ: {get_user_profile_text(data)}. Напиши краткое приветствие, оцени реалистичность цели и дай пару базовых советов. Учти пол пользователя ({data.get('gender')}) при выдаче советов."
                                 plan = generate_ai_response(prompt)
                                 send_message(user_id, plan, keyboard=get_main_keyboard(user_id))
                                 del users_state[user_id]
@@ -314,7 +332,7 @@ def vk_bot_loop():
 
                     if text_lower == '💧 включить воду':
                         if user_id not in users_db: continue
-                        ai_water_norm = generate_ai_response(f"Рассчитай суточную норму воды. Вес: {users_db[user_id].get('weight')} кг, Опыт: {users_db[user_id].get('q_3')}. Выдай ТОЛЬКО конкретный объем в литрах.")
+                        ai_water_norm = generate_ai_response(f"Рассчитай суточную норму воды. Пол: {users_db[user_id].get('gender')}, Вес: {users_db[user_id].get('weight')} кг, Опыт: {users_db[user_id].get('q_3')}. Выдай ТОЛЬКО конкретный объем в литрах.")
                         users_db[user_id]['water_enabled'] = True
                         users_db[user_id]['water_norm'] = ai_water_norm
                         send_message(user_id, f"✅ Уведомления включены.\n{ai_water_norm}", keyboard=get_main_keyboard(user_id))
@@ -355,6 +373,8 @@ def vk_bot_loop():
                         daily_prompt = f"""
                         ДОСЬЕ: {get_user_profile_text(users_db[user_id])}
                         ИСТОРИЯ, ИТОГИ И ВОПРОСЫ ПОЛЬЗОВАТЕЛЯ (УЧТИ ЭТО ДЛЯ КОРРЕКЦИИ): {users_db[user_id].get("history", "")}
+                        
+                        ВНИМАНИЕ: Обязательно учитывай ПОЛ пользователя ({users_db[user_id].get('gender')}) при подборе упражнений (например, смещение акцентов на нужные группы мышц, подходящий уровень нагрузки).
                         
                         Выдай ответ СТРОГО в следующем формате. Пиши ОЧЕНЬ коротко.
                         
