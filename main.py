@@ -10,57 +10,52 @@ from io import BytesIO
 from PIL import Image
 import os
 import sys
+import logging
+
+# --- ЛОГИРОВАНИЕ ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
-# На Bothost переменные берутся напрямую из настроек сервера
 VK_TOKEN = os.getenv("VK_TOKEN")
 PROXY_URL = os.getenv("PROXY_URL")
 GEMINI_TOKENS_STR = os.getenv("GEMINI_TOKENS")
 
 if not VK_TOKEN or not GEMINI_TOKENS_STR:
-    print("ОШИБКА: Не заданы обязательные переменные окружения (VK_TOKEN или GEMINI_TOKENS).")
+    logging.error("Не заданы обязательные переменные окружения (VK_TOKEN или GEMINI_TOKENS).")
     sys.exit(1)
 
-GEMINI_TOKENS = GEMINI_TOKENS_STR.split(",")
+GEMINI_TOKENS = [t.strip() for t in GEMINI_TOKENS_STR.split(",")]
 
-# Применяем прокси глобально для работы Gemini (Google API) - ВЕРНЫЙ РЕГИСТР ДЛЯ LINUX
+# Применяем прокси глобально для работы Gemini
 if PROXY_URL:
     os.environ['HTTP_PROXY'] = PROXY_URL
     os.environ['HTTPS_PROXY'] = PROXY_URL
+    logging.info("Прокси для Google API применен.")
 
-# --- ЦВЕТА ДЛЯ ТЕРМИНАЛА (НЕОНОВЫЙ СТИЛЬ) ---
-PURPLE = '\033[38;5;135m'
-ORANGE = '\033[38;5;208m'
-GREEN = '\033[38;5;82m'
-RED = '\033[38;5;196m'
-RESET = '\033[0m'
-BOLD = '\033[1m'
-
+# Актуальные модели Gemini
 GEMINI_MODELS = [
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite"
+    "gemini-2.0-flash"
 ]
 
-# --- Инициализация ВК с поддержкой прокси ---
+# --- Инициализация ВК ---
 vk_session = vk_api.VkApi(token=VK_TOKEN)
 
-# ПРАВИЛЬНАЯ ИНЪЕКЦИЯ ПРОКСИ В VK_API
 if PROXY_URL:
     vk_session.http.proxies = {
         'http': PROXY_URL,
         'https': PROXY_URL
     }
+    logging.info("Прокси для vk_api применен.")
 
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
-# Хранилища
+# Хранилища (в идеале потом перевести на базу данных, например SQLite)
 users_state = {} 
 users_db = {}    
 
@@ -106,7 +101,6 @@ def get_mood_keyboard():
     keyboard.add_button('Плохо', color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
-# --- ВОПРОСЫ ОПРОСА ---
 SURVEY_QUESTIONS = [
     "1. Выбери свою главную цель:\n1 - Убрать жир\n2 - Убрать живот\n3 - Сделать кубики пресса\n4 - Накачать руки (бицепс/трицепс)\n5 - Накачать широкую спину\n6 - Прокачать ноги и ягодицы\n7 - Улучшить выносливость\n8 - Набрать общую мышечную массу",
     "2. Какая у тебя цель в цифрах? Сколько кг ты хочешь убрать или набрать за месяц? (Напиши число, или '0', если вес не важен)",
@@ -118,10 +112,13 @@ SURVEY_QUESTIONS = [
 ]
 
 def send_message(user_id, text, keyboard=None):
-    post = {'user_id': user_id, 'message': text, 'random_id': 0}
-    if keyboard:
-        post['keyboard'] = keyboard
-    vk.messages.send(**post)
+    try:
+        post = {'user_id': user_id, 'message': text, 'random_id': 0}
+        if keyboard:
+            post['keyboard'] = keyboard
+        vk.messages.send(**post)
+    except Exception as e:
+        logging.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
 
 def generate_ai_response(prompt_data):
     system_prompt = f"""
@@ -137,15 +134,17 @@ def generate_ai_response(prompt_data):
         full_prompt = [f"{system_prompt}\n\nЗАПРОС:\n{prompt_data[0]}", prompt_data[1]]
 
     for token in GEMINI_TOKENS:
-        genai.configure(api_key=token.strip())
+        genai.configure(api_key=token)
         for model_name in GEMINI_MODELS:
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(full_prompt)
                 return response.text.replace("*", "").replace("#", "")
-            except Exception:
+            except Exception as e:
+                logging.warning(f"Ошибка модели {model_name} (токен {token[:8]}...): {e}")
                 continue
                 
+    logging.error("Все ИИ-серверы недоступны или лимиты исчерпаны.")
     return "Произошла системная ошибка NEXUS: все ИИ-серверы временно недоступны."
 
 def get_user_profile_text(user_data):
@@ -166,14 +165,10 @@ def water_reminder_loop():
                 if data.get('water_enabled') == True:
                     norm = data.get('water_norm', 'Ориентируйся на жажду.')
                     msg = f"💧 NEXUS-напоминание: Время выпить стакан воды!\n\nТвоя ИИ-норма на день: {norm}"
-                    try:
-                        send_message(user_id, msg)
-                    except:
-                        pass
+                    send_message(user_id, msg)
 
 # --- ОСНОВНОЙ ПРОЦЕСС БОТА ---
 def vk_bot_loop():
-    # Оборачиваем в try-except для защиты от разрывов соединения (RemoteDisconnected)
     while True:
         try:
             for event in longpoll.listen():
@@ -188,36 +183,39 @@ def vk_bot_loop():
                         send_message(user_id, "Действие отменено.", keyboard=get_main_keyboard(user_id) if user_id in users_db else get_registration_keyboard())
                         continue
 
-                    if text_lower == '⚙️ сбросить' or text_lower == 'сбросить':
+                    if text_lower in ['⚙️ сбросить', 'сбросить']:
                         users_state[user_id] = {"step": "confirm_reset"}
                         send_message(user_id, "Вы точно хотите сбросить все данные?", keyboard=get_confirm_reset_keyboard())
                         continue
                         
                     if user_id in users_state and users_state[user_id].get("step") == "wait_food_photo":
-                        message_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
-                        attachments = message_data.get('attachments', [])
-                        
-                        photo_url = None
-                        for att in attachments:
-                            if att['type'] == 'photo':
-                                photo_url = att['photo']['sizes'][-1]['url']
-                                break
-                        
-                        if photo_url:
-                            send_message(user_id, "Фото получено. Нейросеть NEXUS анализирует состав тарелки...")
-                            try:
-                                # Применяем прокси при скачивании фото (если есть)
+                        try:
+                            message_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
+                            attachments = message_data.get('attachments', [])
+                            
+                            photo_url = None
+                            for att in attachments:
+                                if att['type'] == 'photo':
+                                    photo_url = att['photo']['sizes'][-1]['url']
+                                    break
+                            
+                            if photo_url:
+                                send_message(user_id, "Фото получено. Нейросеть NEXUS анализирует состав тарелки...")
                                 req_proxies = {'http': PROXY_URL, 'https': PROXY_URL} if PROXY_URL else None
                                 response = requests.get(photo_url, proxies=req_proxies)
+                                response.raise_for_status()
+                                
                                 img = Image.open(BytesIO(response.content))
                                 prompt = "Посмотри на фото. Скажи, что это за еда и напиши примерную калорийность (КБЖУ). Если еду видно плохо, так и скажи и попроси прислать фото лучше."
                                 ai_answer = generate_ai_response([prompt, img])
                                 send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
-                            except Exception:
-                                send_message(user_id, "Не удалось обработать фото.", keyboard=get_main_keyboard(user_id))
-                            del users_state[user_id]
-                        else:
-                            send_message(user_id, "Я не вижу фото. Пожалуйста, прикрепи картинку или нажми 'Отменить'.", keyboard=get_cancel_keyboard())
+                                del users_state[user_id]
+                            else:
+                                send_message(user_id, "Я не вижу фото. Пожалуйста, прикрепи картинку или нажми 'Отменить'.", keyboard=get_cancel_keyboard())
+                        except Exception as e:
+                            logging.error(f"Ошибка при обработке фото еды: {e}")
+                            send_message(user_id, "Не удалось загрузить или обработать фото. Попробуй еще раз.", keyboard=get_main_keyboard(user_id))
+                            if user_id in users_state: del users_state[user_id]
                         continue
 
                     if user_id in users_state:
@@ -390,75 +388,19 @@ def vk_bot_loop():
                         send_message(user_id, "Используй кнопки меню ниже!", keyboard=get_main_keyboard(user_id))
                     else:
                         send_message(user_id, "Напиши 'Начать'.", keyboard=get_registration_keyboard())
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Сетевая ошибка VK LongPoll (возможно, отвалился прокси): {e}")
+            time.sleep(5)
         except Exception as e:
-            # Если прокси обрывается (RemoteDisconnected), скрипт подождет 5 сек и перезапустится
+            logging.error(f"Непредвиденная ошибка в основном цикле LongPoll: {e}")
             time.sleep(5)
 
-# --- BOOT MENU ТЕРМИНАЛА ---
-def print_header():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print(f"{PURPLE}{BOLD}")
-    print(" █▄░█ █▀▀ ▀▄▀ █░█ █▀")
-    print(" █░▀█ ██▄ █░█ █▄█ ▄█")
-    print(f"=== AI FITNESS SYSTEM ==={RESET}\n")
-
-def boot_menu():
-    while True:
-        print_header()
-        print(f"{ORANGE}[1]{RESET} Открыть Админ-панель")
-        print(f"{ORANGE}[2]{RESET} Проверить токены и модели")
-        print(f"{ORANGE}[3]{RESET} Отключить NEXUS\n")
-        
-        choice = input(f"{PURPLE}Выбор: {RESET}").strip()
-        
-        if choice == '1':
-            print_header()
-            print(f"{ORANGE}--- АДМИН ПАНЕЛЬ ---{RESET}")
-            vk_id_input = input("Введите VK ID пользователя для теста (или Enter для отмены): ").strip()
-            if vk_id_input.isdigit():
-                try:
-                    send_message(int(vk_id_input), "💧 [ТЕСТ АДМИНА] Это системное уведомление. Пора выпить стакан воды!")
-                    print(f"{GREEN}Уведомление успешно отправлено!{RESET}")
-                except Exception as e:
-                    print(f"{RED}Ошибка отправки: {e}{RESET}")
-            input(f"\n{PURPLE}Нажмите Enter для возврата...{RESET}")
-            
-        elif choice == '2':
-            print_header()
-            print(f"{ORANGE}--- ПРОВЕРКА НЕЙРОСЕТЕЙ ---{RESET}")
-            for token in GEMINI_TOKENS:
-                print(f"\n{PURPLE}Токен:{RESET} {token[:12]}... ", end="")
-                token_works = False
-                genai.configure(api_key=token.strip())
-                
-                model_statuses = []
-                for model_name in GEMINI_MODELS:
-                    try:
-                        model = genai.GenerativeModel(model_name)
-                        model.generate_content("Тест")
-                        model_statuses.append(f"  └─ Модель {model_name}: {GREEN}(работает){RESET}")
-                        token_works = True
-                    except Exception:
-                        model_statuses.append(f"  └─ Модель {model_name}: {RED}(не работает){RESET}")
-                
-                if token_works:
-                    print(f"{GREEN}[РАБОТАЕТ]{RESET}")
-                else:
-                    print(f"{RED}[НЕ РАБОТАЕТ]{RESET}")
-                    
-                for status in model_statuses:
-                    print(status)
-                    
-            input(f"\n{PURPLE}Нажмите Enter для возврата...{RESET}")
-            
-        elif choice == '3':
-            print_header()
-            print(f"{RED}Инициировано завершение работы NEXUS...{RESET}")
-            os._exit(0)
-
 if __name__ == "__main__":
-    threading.Thread(target=water_reminder_loop, daemon=True).start()
-    threading.Thread(target=vk_bot_loop, daemon=True).start()
+    logging.info("NEXUS BOT STARTED")
     
-    time.sleep(1)
-    boot_menu()
+    # Фоновый поток для уведомлений о воде
+    threading.Thread(target=water_reminder_loop, daemon=True).start()
+    
+    # Основной поток держит LongPoll (не daemon, чтобы скрипт не завершался)
+    vk_bot_loop()
