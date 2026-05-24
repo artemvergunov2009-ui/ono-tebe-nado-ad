@@ -10,12 +10,9 @@ from io import BytesIO
 from PIL import Image
 import os
 import sys
-from dotenv import load_dotenv
-
-# Загружаем переменные окружения из файла .env
-load_dotenv()
 
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
+# На Bothost переменные берутся напрямую из настроек сервера
 VK_TOKEN = os.getenv("VK_TOKEN")
 PROXY_URL = os.getenv("PROXY_URL")
 GEMINI_TOKENS_STR = os.getenv("GEMINI_TOKENS")
@@ -26,10 +23,10 @@ if not VK_TOKEN or not GEMINI_TOKENS_STR:
 
 GEMINI_TOKENS = GEMINI_TOKENS_STR.split(",")
 
-# Применяем прокси глобально для работы Gemini (Google API)
+# Применяем прокси глобально для работы Gemini (Google API) - ВЕРНЫЙ РЕГИСТР ДЛЯ LINUX
 if PROXY_URL:
-    os.environ['http_proxy'] = PROXY_URL
-    os.environ['https_proxy'] = PROXY_URL
+    os.environ['HTTP_PROXY'] = PROXY_URL
+    os.environ['HTTPS_PROXY'] = PROXY_URL
 
 # --- ЦВЕТА ДЛЯ ТЕРМИНАЛА (НЕОНОВЫЙ СТИЛЬ) ---
 PURPLE = '\033[38;5;135m'
@@ -51,11 +48,15 @@ GEMINI_MODELS = [
 ]
 
 # --- Инициализация ВК с поддержкой прокси ---
-vk_session_http = requests.Session()
-if PROXY_URL:
-    vk_session_http.proxies.update({'http': PROXY_URL, 'https': PROXY_URL})
+vk_session = vk_api.VkApi(token=VK_TOKEN)
 
-vk_session = vk_api.VkApi(token=VK_TOKEN, session=vk_session_http)
+# ПРАВИЛЬНАЯ ИНЪЕКЦИЯ ПРОКСИ В VK_API
+if PROXY_URL:
+    vk_session.http.proxies = {
+        'http': PROXY_URL,
+        'https': PROXY_URL
+    }
+
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
@@ -172,220 +173,226 @@ def water_reminder_loop():
 
 # --- ОСНОВНОЙ ПРОЦЕСС БОТА ---
 def vk_bot_loop():
-    for event in longpoll.listen():
-        if event.type == VkEventType.MESSAGE_NEW and event.to_me:
-            user_id = event.user_id
-            raw_text = event.text.strip()
-            text_lower = raw_text.lower()
-            
-            if text_lower == '❌ отменить':
-                if user_id in users_state:
-                    del users_state[user_id]
-                send_message(user_id, "Действие отменено.", keyboard=get_main_keyboard(user_id) if user_id in users_db else get_registration_keyboard())
-                continue
-
-            if text_lower == '⚙️ сбросить' or text_lower == 'сбросить':
-                users_state[user_id] = {"step": "confirm_reset"}
-                send_message(user_id, "Вы точно хотите сбросить все данные?", keyboard=get_confirm_reset_keyboard())
-                continue
-                
-            if user_id in users_state and users_state[user_id].get("step") == "wait_food_photo":
-                message_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
-                attachments = message_data.get('attachments', [])
-                
-                photo_url = None
-                for att in attachments:
-                    if att['type'] == 'photo':
-                        photo_url = att['photo']['sizes'][-1]['url']
-                        break
-                
-                if photo_url:
-                    send_message(user_id, "Фото получено. Нейросеть NEXUS анализирует состав тарелки...")
-                    try:
-                        # Применяем прокси при скачивании фото
-                        proxies = {'http': PROXY_URL, 'https': PROXY_URL} if PROXY_URL else None
-                        response = requests.get(photo_url, proxies=proxies)
-                        img = Image.open(BytesIO(response.content))
-                        prompt = "Посмотри на фото. Скажи, что это за еда и напиши примерную калорийность (КБЖУ). Если еду видно плохо, так и скажи и попроси прислать фото лучше."
-                        ai_answer = generate_ai_response([prompt, img])
-                        send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
-                    except Exception:
-                        send_message(user_id, "Не удалось обработать фото.", keyboard=get_main_keyboard(user_id))
-                    del users_state[user_id]
-                else:
-                    send_message(user_id, "Я не вижу фото. Пожалуйста, прикрепи картинку или нажми 'Отменить'.", keyboard=get_cancel_keyboard())
-                continue
-
-            if user_id in users_state:
-                step = users_state[user_id].get("step")
-                
-                if step == "confirm_reset":
-                    if text_lower == 'да':
-                        if user_id in users_db: del users_db[user_id]
-                        del users_state[user_id]
-                        send_message(user_id, "✅ Данные удалены. Напиши 'Начать'.", keyboard=VkKeyboard.get_empty_keyboard())
-                    elif text_lower == 'нет':
-                        del users_state[user_id]
-                        send_message(user_id, "Сброс отменен.", keyboard=get_main_keyboard(user_id) if user_id in users_db else get_registration_keyboard())
-                    else:
-                        send_message(user_id, "Нажми 'ДА' или 'НЕТ'.", keyboard=get_confirm_reset_keyboard())
-                    continue
-
-                if step == "wait_trainer_msg":
-                    users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Сообщение тренеру от {datetime.datetime.now().strftime('%d.%m')}]: {raw_text}"
-                    send_message(user_id, "Анализирую твое сообщение...")
+    # Оборачиваем в try-except для защиты от разрывов соединения (RemoteDisconnected)
+    while True:
+        try:
+            for event in longpoll.listen():
+                if event.type == VkEventType.MESSAGE_NEW and event.to_me:
+                    user_id = event.user_id
+                    raw_text = event.text.strip()
+                    text_lower = raw_text.lower()
                     
-                    prompt = f"Пользователь написал своему ИИ-тренеру: '{raw_text}'. ДОСЬЕ: {get_user_profile_text(users_db[user_id])}. Ответь на вопрос или подтверди, что информация принята и будет учтена в следующих тренировках. Отвечай кратко и по делу."
-                    ai_answer = generate_ai_response(prompt)
-                    
-                    send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
-                    del users_state[user_id]
-                    continue
-                
-                if step == "results_1":
-                    users_state[user_id]["results"] = {"steps": raw_text}
-                    users_state[user_id]["step"] = "results_2"
-                    send_message(user_id, "Что из плана ты сегодня пропустил? Напиши честно.", keyboard=get_cancel_keyboard())
-                    continue
-                elif step == "results_2":
-                    users_state[user_id]["results"]["missed"] = raw_text
-                    users_state[user_id]["step"] = "results_3"
-                    send_message(user_id, "Как в целом прошел день?", keyboard=get_mood_keyboard())
-                    continue
-                elif step == "results_3":
-                    users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Итоги от {datetime.datetime.now().strftime('%d.%m')}]: шаги {users_state[user_id]['results']['steps']}, пропуски: {users_state[user_id]['results']['missed']}, настроение: {raw_text}"
-                    send_message(user_id, "Итоги дня сохранены! Учту это для плана на завтра.", keyboard=get_main_keyboard(user_id))
-                    del users_state[user_id]
-                    continue
+                    if text_lower == '❌ отменить':
+                        if user_id in users_state:
+                            del users_state[user_id]
+                        send_message(user_id, "Действие отменено.", keyboard=get_main_keyboard(user_id) if user_id in users_db else get_registration_keyboard())
+                        continue
 
-                data = users_state[user_id].get("data", {})
-                if step == "name":
-                    data["name"] = raw_text
-                    users_state[user_id]["step"] = "age"
-                    send_message(user_id, f"Отлично, {raw_text}! Сколько тебе лет?", keyboard=get_registration_keyboard())
-                elif step == "age":
-                    data["age"] = raw_text
-                    users_state[user_id]["step"] = "height"
-                    send_message(user_id, "Какой у тебя рост (в см)?", keyboard=get_registration_keyboard())
-                elif step == "height":
-                    data["height"] = raw_text
-                    users_state[user_id]["step"] = "weight"
-                    send_message(user_id, "Какой у тебя вес (в кг)?", keyboard=get_registration_keyboard())
-                elif step == "weight":
-                    data["weight"] = raw_text
-                    users_state[user_id]["step"] = "q_0"
-                    send_message(user_id, "Супер. Перейдем к целям.\n\n" + SURVEY_QUESTIONS[0], keyboard=get_registration_keyboard())
-                elif step.startswith("q_"):
-                    q_index = int(step.split("_")[1])
-                    data[f"q_{q_index}"] = raw_text
-                    next_q_index = q_index + 1
-                    
-                    if next_q_index < len(SURVEY_QUESTIONS):
-                        users_state[user_id]["step"] = f"q_{next_q_index}"
-                        send_message(user_id, SURVEY_QUESTIONS[next_q_index], keyboard=get_registration_keyboard())
-                    else:
-                        send_message(user_id, "Составляю твой фитнес-план. Подожди 10 секунд...")
-                        users_db[user_id] = data.copy()
-                        users_db[user_id]["day_count"] = 0
-                        users_db[user_id]["last_day_date"] = ""
-                        users_db[user_id]["history"] = ""
+                    if text_lower == '⚙️ сбросить' or text_lower == 'сбросить':
+                        users_state[user_id] = {"step": "confirm_reset"}
+                        send_message(user_id, "Вы точно хотите сбросить все данные?", keyboard=get_confirm_reset_keyboard())
+                        continue
                         
-                        prompt = f"ДОСЬЕ: {get_user_profile_text(data)}. Напиши краткое приветствие, оцени реалистичность цели и дай пару базовых советов."
-                        plan = generate_ai_response(prompt)
-                        send_message(user_id, plan, keyboard=get_main_keyboard(user_id))
-                        del users_state[user_id]
-                continue
+                    if user_id in users_state and users_state[user_id].get("step") == "wait_food_photo":
+                        message_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
+                        attachments = message_data.get('attachments', [])
+                        
+                        photo_url = None
+                        for att in attachments:
+                            if att['type'] == 'photo':
+                                photo_url = att['photo']['sizes'][-1]['url']
+                                break
+                        
+                        if photo_url:
+                            send_message(user_id, "Фото получено. Нейросеть NEXUS анализирует состав тарелки...")
+                            try:
+                                # Применяем прокси при скачивании фото (если есть)
+                                req_proxies = {'http': PROXY_URL, 'https': PROXY_URL} if PROXY_URL else None
+                                response = requests.get(photo_url, proxies=req_proxies)
+                                img = Image.open(BytesIO(response.content))
+                                prompt = "Посмотри на фото. Скажи, что это за еда и напиши примерную калорийность (КБЖУ). Если еду видно плохо, так и скажи и попроси прислать фото лучше."
+                                ai_answer = generate_ai_response([prompt, img])
+                                send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
+                            except Exception:
+                                send_message(user_id, "Не удалось обработать фото.", keyboard=get_main_keyboard(user_id))
+                            del users_state[user_id]
+                        else:
+                            send_message(user_id, "Я не вижу фото. Пожалуйста, прикрепи картинку или нажми 'Отменить'.", keyboard=get_cancel_keyboard())
+                        continue
 
-            if text_lower in ['начать', '/start', 'привет']:
-                if user_id in users_db:
-                    send_message(user_id, "Я помню твои параметры! Если хочешь начать заново, нажми 'Сбросить'.", keyboard=get_main_keyboard(user_id))
-                else:
-                    users_state[user_id] = {"step": "name", "data": {}}
-                    send_message(user_id, "Привет! Я 'NEXUS-фитнес'. Давай заполним анкету.\n\nКак тебя зовут?", keyboard=get_registration_keyboard())
-                continue
+                    if user_id in users_state:
+                        step = users_state[user_id].get("step")
+                        
+                        if step == "confirm_reset":
+                            if text_lower == 'да':
+                                if user_id in users_db: del users_db[user_id]
+                                del users_state[user_id]
+                                send_message(user_id, "✅ Данные удалены. Напиши 'Начать'.", keyboard=VkKeyboard.get_empty_keyboard())
+                            elif text_lower == 'нет':
+                                del users_state[user_id]
+                                send_message(user_id, "Сброс отменен.", keyboard=get_main_keyboard(user_id) if user_id in users_db else get_registration_keyboard())
+                            else:
+                                send_message(user_id, "Нажми 'ДА' или 'НЕТ'.", keyboard=get_confirm_reset_keyboard())
+                            continue
 
-            if text_lower == '📝 написать тренеру':
-                if user_id not in users_db: continue
-                users_state[user_id] = {"step": "wait_trainer_msg"}
-                send_message(user_id, "Что ты хочешь рассказать? Опиши изменения в рационе, пропущенные упражнения или задай любой вопрос.", keyboard=get_cancel_keyboard())
-                continue
+                        if step == "wait_trainer_msg":
+                            users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Сообщение тренеру от {datetime.datetime.now().strftime('%d.%m')}]: {raw_text}"
+                            send_message(user_id, "Анализирую твое сообщение...")
+                            
+                            prompt = f"Пользователь написал своему ИИ-тренеру: '{raw_text}'. ДОСЬЕ: {get_user_profile_text(users_db[user_id])}. Ответь на вопрос или подтверди, что информация принята и будет учтена в следующих тренировках. Отвечай кратко и по делу."
+                            ai_answer = generate_ai_response(prompt)
+                            
+                            send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
+                            del users_state[user_id]
+                            continue
+                        
+                        if step == "results_1":
+                            users_state[user_id]["results"] = {"steps": raw_text}
+                            users_state[user_id]["step"] = "results_2"
+                            send_message(user_id, "Что из плана ты сегодня пропустил? Напиши честно.", keyboard=get_cancel_keyboard())
+                            continue
+                        elif step == "results_2":
+                            users_state[user_id]["results"]["missed"] = raw_text
+                            users_state[user_id]["step"] = "results_3"
+                            send_message(user_id, "Как в целом прошел день?", keyboard=get_mood_keyboard())
+                            continue
+                        elif step == "results_3":
+                            users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Итоги от {datetime.datetime.now().strftime('%d.%m')}]: шаги {users_state[user_id]['results']['steps']}, пропуски: {users_state[user_id]['results']['missed']}, настроение: {raw_text}"
+                            send_message(user_id, "Итоги дня сохранены! Учту это для плана на завтра.", keyboard=get_main_keyboard(user_id))
+                            del users_state[user_id]
+                            continue
 
-            if text_lower == '💧 включить воду':
-                if user_id not in users_db: continue
-                ai_water_norm = generate_ai_response(f"Рассчитай суточную норму воды. Вес: {users_db[user_id].get('weight')} кг, Опыт: {users_db[user_id].get('q_3')}. Выдай ТОЛЬКО конкретный объем в литрах.")
-                users_db[user_id]['water_enabled'] = True
-                users_db[user_id]['water_norm'] = ai_water_norm
-                send_message(user_id, f"✅ Уведомления включены.\n{ai_water_norm}", keyboard=get_main_keyboard(user_id))
-                continue
+                        data = users_state[user_id].get("data", {})
+                        if step == "name":
+                            data["name"] = raw_text
+                            users_state[user_id]["step"] = "age"
+                            send_message(user_id, f"Отлично, {raw_text}! Сколько тебе лет?", keyboard=get_registration_keyboard())
+                        elif step == "age":
+                            data["age"] = raw_text
+                            users_state[user_id]["step"] = "height"
+                            send_message(user_id, "Какой у тебя рост (в см)?", keyboard=get_registration_keyboard())
+                        elif step == "height":
+                            data["height"] = raw_text
+                            users_state[user_id]["step"] = "weight"
+                            send_message(user_id, "Какой у тебя вес (в кг)?", keyboard=get_registration_keyboard())
+                        elif step == "weight":
+                            data["weight"] = raw_text
+                            users_state[user_id]["step"] = "q_0"
+                            send_message(user_id, "Супер. Перейдем к целям.\n\n" + SURVEY_QUESTIONS[0], keyboard=get_registration_keyboard())
+                        elif step.startswith("q_"):
+                            q_index = int(step.split("_")[1])
+                            data[f"q_{q_index}"] = raw_text
+                            next_q_index = q_index + 1
+                            
+                            if next_q_index < len(SURVEY_QUESTIONS):
+                                users_state[user_id]["step"] = f"q_{next_q_index}"
+                                send_message(user_id, SURVEY_QUESTIONS[next_q_index], keyboard=get_registration_keyboard())
+                            else:
+                                send_message(user_id, "Составляю твой фитнес-план. Подожди 10 секунд...")
+                                users_db[user_id] = data.copy()
+                                users_db[user_id]["day_count"] = 0
+                                users_db[user_id]["last_day_date"] = ""
+                                users_db[user_id]["history"] = ""
+                                
+                                prompt = f"ДОСЬЕ: {get_user_profile_text(data)}. Напиши краткое приветствие, оцени реалистичность цели и дай пару базовых советов."
+                                plan = generate_ai_response(prompt)
+                                send_message(user_id, plan, keyboard=get_main_keyboard(user_id))
+                                del users_state[user_id]
+                        continue
 
-            if text_lower == '🔕 выключить воду':
-                if user_id in users_db:
-                    users_db[user_id]['water_enabled'] = False
-                    send_message(user_id, "❌ Вода отключена.", keyboard=get_main_keyboard(user_id))
-                continue
+                    if text_lower in ['начать', '/start', 'привет']:
+                        if user_id in users_db:
+                            send_message(user_id, "Я помню твои параметры! Если хочешь начать заново, нажми 'Сбросить'.", keyboard=get_main_keyboard(user_id))
+                        else:
+                            users_state[user_id] = {"step": "name", "data": {}}
+                            send_message(user_id, "Привет! Я 'NEXUS-фитнес'. Давай заполним анкету.\n\nКак тебя зовут?", keyboard=get_registration_keyboard())
+                        continue
 
-            if text_lower == '🍽 анализ еды':
-                if user_id not in users_db: continue
-                users_state[user_id] = {"step": "wait_food_photo"}
-                send_message(user_id, "Отправь мне фото своей тарелки с едой!", keyboard=get_cancel_keyboard())
-                continue
-                
-            if text_lower == '📊 итоги дня':
-                if user_id not in users_db: continue
-                users_state[user_id] = {"step": "results_1"}
-                send_message(user_id, "Давай подведем итоги! Сколько шагов ты сегодня прошел?", keyboard=get_cancel_keyboard())
-                continue
+                    if text_lower == '📝 написать тренеру':
+                        if user_id not in users_db: continue
+                        users_state[user_id] = {"step": "wait_trainer_msg"}
+                        send_message(user_id, "Что ты хочешь рассказать? Опиши изменения в рационе, пропущенные упражнения или задай любой вопрос.", keyboard=get_cancel_keyboard())
+                        continue
 
-            if text_lower == '🔥 новый день':
-                if user_id not in users_db:
-                    send_message(user_id, "Сначала пройди регистрацию! Напиши 'Начать'.", keyboard=get_registration_keyboard())
-                    continue
-                
-                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-                if users_db[user_id].get("last_day_date") == today_str:
-                    send_message(user_id, "Новый день еще не начался! Следующий план будет доступен после 00:00.", keyboard=get_main_keyboard(user_id))
-                    continue
-                    
-                send_message(user_id, "Генерирую план на сегодня...")
-                users_db[user_id]["day_count"] = users_db[user_id].get("day_count", 0) + 1
-                users_db[user_id]["last_day_date"] = today_str
-                
-                daily_prompt = f"""
-                ДОСЬЕ: {get_user_profile_text(users_db[user_id])}
-                ИСТОРИЯ, ИТОГИ И ВОПРОСЫ ПОЛЬЗОВАТЕЛЯ (УЧТИ ЭТО ДЛЯ КОРРЕКЦИИ): {users_db[user_id].get("history", "")}
-                
-                Выдай ответ СТРОГО в следующем формате. Пиши ОЧЕНЬ коротко.
-                
-                День {users_db[user_id]["day_count"]}🔥 - {datetime.datetime.now().strftime("%d %B %Y")} год:
+                    if text_lower == '💧 включить воду':
+                        if user_id not in users_db: continue
+                        ai_water_norm = generate_ai_response(f"Рассчитай суточную норму воды. Вес: {users_db[user_id].get('weight')} кг, Опыт: {users_db[user_id].get('q_3')}. Выдай ТОЛЬКО конкретный объем в литрах.")
+                        users_db[user_id]['water_enabled'] = True
+                        users_db[user_id]['water_norm'] = ai_water_norm
+                        send_message(user_id, f"✅ Уведомления включены.\n{ai_water_norm}", keyboard=get_main_keyboard(user_id))
+                        continue
 
-                Питание:
-                завтрак:
-                - [еда, количество]
-                - [еда]
-                обед:
-                - [еда]
-                - [еда]
-                ужин:
-                - [еда]
-                - [еда]
+                    if text_lower == '🔕 выключить воду':
+                        if user_id in users_db:
+                            users_db[user_id]['water_enabled'] = False
+                            send_message(user_id, "❌ Вода отключена.", keyboard=get_main_keyboard(user_id))
+                        continue
 
-                Упражнения на сегодня:
-                1. [Название] [количество] раз
-                2. [Название] [количество] раз
+                    if text_lower == '🍽 анализ еды':
+                        if user_id not in users_db: continue
+                        users_state[user_id] = {"step": "wait_food_photo"}
+                        send_message(user_id, "Отправь мне фото своей тарелки с едой!", keyboard=get_cancel_keyboard())
+                        continue
+                        
+                    if text_lower == '📊 итоги дня':
+                        if user_id not in users_db: continue
+                        users_state[user_id] = {"step": "results_1"}
+                        send_message(user_id, "Давай подведем итоги! Сколько шагов ты сегодня прошел?", keyboard=get_cancel_keyboard())
+                        continue
 
-                прогулка:
-                пройти сегодня [количество] километров
+                    if text_lower == '🔥 новый день':
+                        if user_id not in users_db:
+                            send_message(user_id, "Сначала пройди регистрацию! Напиши 'Начать'.", keyboard=get_registration_keyboard())
+                            continue
+                        
+                        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                        if users_db[user_id].get("last_day_date") == today_str:
+                            send_message(user_id, "Новый день еще не начался! Следующий план будет доступен после 00:00.", keyboard=get_main_keyboard(user_id))
+                            continue
+                            
+                        send_message(user_id, "Генерирую план на сегодня...")
+                        users_db[user_id]["day_count"] = users_db[user_id].get("day_count", 0) + 1
+                        users_db[user_id]["last_day_date"] = today_str
+                        
+                        daily_prompt = f"""
+                        ДОСЬЕ: {get_user_profile_text(users_db[user_id])}
+                        ИСТОРИЯ, ИТОГИ И ВОПРОСЫ ПОЛЬЗОВАТЕЛЯ (УЧТИ ЭТО ДЛЯ КОРРЕКЦИИ): {users_db[user_id].get("history", "")}
+                        
+                        Выдай ответ СТРОГО в следующем формате. Пиши ОЧЕНЬ коротко.
+                        
+                        День {users_db[user_id]["day_count"]}🔥 - {datetime.datetime.now().strftime("%d %B %Y")} год:
 
-                Удачи!
-                """
-                response_text = generate_ai_response(daily_prompt)
-                send_message(user_id, response_text, keyboard=get_main_keyboard(user_id))
-                continue
+                        Питание:
+                        завтрак:
+                        - [еда, количество]
+                        - [еда]
+                        обед:
+                        - [еда]
+                        - [еда]
+                        ужин:
+                        - [еда]
+                        - [еда]
 
-            if user_id in users_db:
-                send_message(user_id, "Используй кнопки меню ниже!", keyboard=get_main_keyboard(user_id))
-            else:
-                send_message(user_id, "Напиши 'Начать'.", keyboard=get_registration_keyboard())
+                        Упражнения на сегодня:
+                        1. [Название] [количество] раз
+                        2. [Название] [количество] раз
+
+                        прогулка:
+                        пройти сегодня [количество] километров
+
+                        Удачи!
+                        """
+                        response_text = generate_ai_response(daily_prompt)
+                        send_message(user_id, response_text, keyboard=get_main_keyboard(user_id))
+                        continue
+
+                    if user_id in users_db:
+                        send_message(user_id, "Используй кнопки меню ниже!", keyboard=get_main_keyboard(user_id))
+                    else:
+                        send_message(user_id, "Напиши 'Начать'.", keyboard=get_registration_keyboard())
+        except Exception as e:
+            # Если прокси обрывается (RemoteDisconnected), скрипт подождет 5 сек и перезапустится
+            time.sleep(5)
 
 # --- BOOT MENU ТЕРМИНАЛА ---
 def print_header():
