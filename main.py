@@ -51,9 +51,12 @@ GEMINI_MODELS = [
 ]
 
 # --- Инициализация ВК с поддержкой прокси ---
+# Создаем сессию с явным указанием прокси (как ты просил)
 vk_session_http = requests.Session()
-if PROXY_URL:
-    vk_session_http.proxies.update({'http': PROXY_URL, 'https': PROXY_URL})
+vk_session_http.proxies = {
+    'http': 'http://eyp4w7k7exov:03vad1jyzl3yxiu@209.50.190.45:3129',
+    'https': 'http://eyp4w7k7exov:03vad1jyzl3yxiu@209.50.190.45:3129'
+}
 
 vk_session = vk_api.VkApi(token=VK_TOKEN, session=vk_session_http)
 vk = vk_session.get_api()
@@ -202,8 +205,11 @@ def vk_bot_loop():
                 if photo_url:
                     send_message(user_id, "Фото получено. Нейросеть NEXUS анализирует состав тарелки...")
                     try:
-                        # Применяем прокси при скачивании фото
-                        proxies = {'http': PROXY_URL, 'https': PROXY_URL} if PROXY_URL else None
+                        # Применяем тот же прокси при скачивании фото
+                        proxies = {
+                            'http': 'http://eyp4w7k7exov:03vad1jyzl3yxiu@209.50.190.45:3129',
+                            'https': 'http://eyp4w7k7exov:03vad1jyzl3yxiu@209.50.190.45:3129'
+                        }
                         response = requests.get(photo_url, proxies=proxies)
                         img = Image.open(BytesIO(response.content))
                         prompt = "Посмотри на фото. Скажи, что это за еда и напиши примерную калорийность (КБЖУ). Если еду видно плохо, так и скажи и попроси прислать фото лучше."
