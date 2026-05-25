@@ -115,6 +115,15 @@ def get_yes_no_keyboard():
     keyboard.add_button('НЕТ', color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
+# --- НОВАЯ КЛАВИАТУРА ДЛЯ АНАЛИЗА ЕДЫ ---
+def get_food_confirm_keyboard():
+    keyboard = VkKeyboard(one_time=True)
+    keyboard.add_button('ДА', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Уточнить', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('❌ Отменить', color=VkKeyboardColor.NEGATIVE)
+    return keyboard.get_keyboard()
+
 def get_cancel_keyboard():
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('❌ Отменить', color=VkKeyboardColor.NEGATIVE)
@@ -128,7 +137,7 @@ def get_mood_keyboard():
     return keyboard.get_keyboard()
 
 SURVEY_QUESTIONS = [
-    "1. Выбери свою главную цель:\n1 - Убрать жир\n2 - Убрать живот\n3 - Сделать кубики пресса\n4 - Накачать руки (бицепс/трицепс)\n5 - Накачать широкую спину\n6 - Прокачать ноги и ягодицы\n7 - Улучшить выносливость\n8 - Набрать общую мышечную массу \nЛибо же напишите свои пожелания без цифр",
+    "1. Выбери свою главную цель:\n1 - Убрать жир\n2 - Убрать живот\n3 - Сделать кубики пресса\n4 - Накачать руки (бицепс/трицепс)\n5 - Накачать широкую спину\n6 - Прокачать ноги и ягодицы\n7 - Улучшить выносливость\n8 - Набрать общую мышечную массу",
     "2. Какая у тебя цель в цифрах? Сколько кг ты хочешь убрать или набрать за месяц? (Напиши число, или '0', если вес не важен)",
     "3. Где ты будешь заниматься и с чем? (В спортзале, дома без инвентаря, дома с гантелями/резинками, на уличных турниках)",
     "4. Оцени свой текущий уровень подготовки. (Новичок, любитель, профи)",
@@ -234,8 +243,12 @@ def vk_bot_loop():
                                 img = Image.open(BytesIO(response.content))
                                 prompt = "Посмотри на фото. Скажи, что это за еда и напиши примерную калорийность (КБЖУ). Если еду видно плохо, так и скажи и попроси прислать фото лучше."
                                 ai_answer = generate_ai_response([prompt, img])
-                                send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
-                                del users_state[user_id]
+                                
+                                # Сохраняем ответ ИИ во временное хранилище и переходим к этапу подтверждения
+                                users_state[user_id]["last_food_analysis"] = ai_answer
+                                users_state[user_id]["step"] = "wait_food_confirm"
+                                
+                                send_message(user_id, f"{ai_answer}\n\nЯ правильно распознал еду?", keyboard=get_food_confirm_keyboard())
                             else:
                                 send_message(user_id, "Я не вижу фото. Пожалуйста, прикрепи картинку или нажми 'Отменить'.", keyboard=get_cancel_keyboard())
                         except Exception as e:
@@ -247,6 +260,34 @@ def vk_bot_loop():
                     if user_id in users_state:
                         step = users_state[user_id].get("step")
                         
+                        # --- ОБРАБОТКА ПОДТВЕРЖДЕНИЯ ЕДЫ ---
+                        if step == "wait_food_confirm":
+                            if text_lower == 'да':
+                                food_info = users_state[user_id].get("last_food_analysis", "Еда по фото")
+                                # Записываем в историю, чтобы бот учитывал это в будущем
+                                users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Прием пищи {datetime.datetime.now().strftime('%d.%m')}]: {food_info}"
+                                send_message(user_id, "Отлично! Зафиксировал этот прием пищи. Учту полученные калории при составлении следующих тренировок.", keyboard=get_main_keyboard(user_id))
+                                del users_state[user_id]
+                            elif text_lower == 'уточнить':
+                                users_state[user_id]["step"] = "wait_food_clarification"
+                                send_message(user_id, "Понял! Напиши текстом, что именно ты сейчас собираешься съесть и примерный вес порции (например: '150г вареной гречки и 100г куриной грудки').", keyboard=get_cancel_keyboard())
+                            else:
+                                send_message(user_id, "Пожалуйста, используй кнопки 'ДА' или 'Уточнить'.", keyboard=get_food_confirm_keyboard())
+                            continue
+                            
+                        if step == "wait_food_clarification":
+                            send_message(user_id, "Считаю калории по твоему описанию...")
+                            prompt = f"Пользователь съел: '{raw_text}'. Рассчитай примерную калорийность и КБЖУ. Напиши коротко и четко."
+                            ai_answer = generate_ai_response(prompt)
+                            
+                            # Записываем уточненные данные в историю
+                            users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Прием пищи {datetime.datetime.now().strftime('%d.%m')} (Уточнение)]: {raw_text}. Анализ: {ai_answer}"
+                            
+                            send_message(user_id, f"{ai_answer}\n\nСупер, я зафиксировал этот прием пищи в твою базу!", keyboard=get_main_keyboard(user_id))
+                            del users_state[user_id]
+                            continue
+                        # -----------------------------------
+
                         if step == "confirm_reset":
                             if text_lower == 'да':
                                 if user_id in users_db: del users_db[user_id]
@@ -259,7 +300,6 @@ def vk_bot_loop():
                                 send_message(user_id, "Нажми 'ДА' или 'НЕТ'.", keyboard=get_confirm_reset_keyboard())
                             continue
 
-                        # --- ОБРАБОТКА УТОЧНЕНИЙ НОВОГО ДНЯ ---
                         if step == "wait_day_clarification":
                             if text_lower == 'нет':
                                 send_message(user_id, "Отлично! Хорошего дня!", keyboard=get_main_keyboard(user_id))
@@ -281,7 +321,6 @@ def vk_bot_loop():
                             send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
                             del users_state[user_id]
                             continue
-                        # ----------------------------------------
 
                         if step == "wait_trainer_msg":
                             users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Сообщение тренеру от {datetime.datetime.now().strftime('%d.%m')}]: {raw_text}"
@@ -441,15 +480,12 @@ def vk_bot_loop():
                         """
                         response_text = generate_ai_response(daily_prompt)
                         
-                        # --- ОБНОВЛЕНИЕ ЗДЕСЬ: Отправляем план, а затем спрашиваем про уточнения ---
-                        send_message(user_id, response_text) # Отправили сгенерированный план без клавиатуры
+                        send_message(user_id, response_text) 
                         
-                        # Спрашиваем, нужны ли изменения
                         question_msg = "Хотите уточнить что-нибудь? (Нет определённых продуктов? Напишите что у вас есть и я распишу как сбалансированно распределить пищу!)"
                         users_state[user_id] = {"step": "wait_day_clarification"}
                         send_message(user_id, question_msg, keyboard=get_yes_no_keyboard())
                         continue
-                        # --------------------------------------------------------------------------
 
                     if user_id in users_db:
                         send_message(user_id, "Используй кнопки меню ниже!", keyboard=get_main_keyboard(user_id))
