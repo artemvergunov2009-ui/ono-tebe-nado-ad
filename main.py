@@ -18,10 +18,12 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
+# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ ---
 VK_TOKEN = os.getenv("VK_TOKEN")
-PROXY_URL = os.getenv("PROXY_URL")
 GEMINI_TOKENS_STR = os.getenv("GEMINI_TOKENS")
+
+# Прокси прописан напрямую в коде, как ты и просил
+PROXY_URL = "http://vjbepkud:fiwibzc0q2sg@38.154.203.95:5863/"
 
 if not VK_TOKEN or not GEMINI_TOKENS_STR:
     logging.error("Не заданы обязательные переменные окружения (VK_TOKEN или GEMINI_TOKENS).")
@@ -33,7 +35,7 @@ GEMINI_TOKENS = [t.strip() for t in GEMINI_TOKENS_STR.split(",")]
 if PROXY_URL:
     os.environ['HTTP_PROXY'] = PROXY_URL
     os.environ['HTTPS_PROXY'] = PROXY_URL
-    logging.info("Прокси для Google API применен.")
+    logging.info("Прокси для Google API применен напрямую из кода.")
 
 # Актуальные модели Gemini
 GEMINI_MODELS = [
@@ -50,12 +52,12 @@ if PROXY_URL:
         'http': PROXY_URL,
         'https': PROXY_URL
     }
-    logging.info("Прокси для vk_api применен.")
+    logging.info("Прокси для vk_api применен напрямую из кода.")
 
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
-# Хранилища (в идеале потом перевести на базу данных, например SQLite)
+# Хранилища
 users_state = {} 
 users_db = {}    
 
@@ -270,13 +272,11 @@ def vk_bot_loop():
 
                         data = users_state[user_id].get("data", {})
                         
-                        # --- ОБНОВЛЕННАЯ ЦЕПОЧКА РЕГИСТРАЦИИ ---
                         if step == "name":
                             data["name"] = raw_text
                             users_state[user_id]["step"] = "gender"
                             send_message(user_id, f"Отлично, {raw_text}! Укажи свой пол:", keyboard=get_gender_keyboard())
                         elif step == "gender":
-                            # Очищаем эмодзи из текста, если пользователь нажал кнопку
                             clean_gender = raw_text.replace("👨", "").replace("👩", "").strip()
                             data["gender"] = clean_gender
                             users_state[user_id]["step"] = "age"
@@ -293,7 +293,6 @@ def vk_bot_loop():
                             data["weight"] = raw_text
                             users_state[user_id]["step"] = "q_0"
                             send_message(user_id, "Супер. Перейдем к целям.\n\n" + SURVEY_QUESTIONS[0], keyboard=get_registration_keyboard())
-                        # ----------------------------------------
                         
                         elif step.startswith("q_"):
                             q_index = int(step.split("_")[1])
@@ -422,5 +421,5 @@ if __name__ == "__main__":
     # Фоновый поток для уведомлений о воде
     threading.Thread(target=water_reminder_loop, daemon=True).start()
     
-    # Основной поток держит LongPoll (не daemon, чтобы скрипт не завершался)
+    # Основной поток держит LongPoll
     vk_bot_loop()
