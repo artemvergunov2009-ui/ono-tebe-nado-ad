@@ -68,8 +68,8 @@ def home():
     return "NEXUS Bot is alive"
 
 def run_web():
-    # Сервер слушает порт 10000 на всех интерфейсах
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 # --- КЛАВИАТУРЫ ---
 def get_registration_keyboard():
