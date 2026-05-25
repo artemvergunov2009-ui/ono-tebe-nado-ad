@@ -61,9 +61,15 @@ if PROXY_URL:
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
-# Хранилища (в идеале потом перевести на базу данных, например SQLite)
+# Хранилища
 users_state = {} 
 users_db = {}    
+
+# --- ДАННЫЕ ДЛЯ СИСТЕМЫ АДМИНИСТРАТОРА ---
+ADMIN_ID = 541038701
+admin_state = {"chatting_with": None}
+admin_queue = [] # Очередь заявок
+admin_stats = {"total_score": 0, "reviews_count": 0} # Рейтинг админа
 
 # --- FLASK СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ ---
 app = Flask(__name__)
@@ -106,6 +112,10 @@ def get_main_keyboard(user_id):
     keyboard.add_line()
     keyboard.add_button('📝 Написать тренеру', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('⚙️ Сбросить', color=VkKeyboardColor.SECONDARY)
+    
+    # --- НОВАЯ КНОПКА ДЛЯ ВЫЗОВА АДМИНА (БОЛЬШАЯ СНИЗУ) ---
+    keyboard.add_line()
+    keyboard.add_button('👨‍💻 Написать Админу', color=VkKeyboardColor.PRIMARY)
     return keyboard.get_keyboard()
 
 def get_confirm_reset_keyboard():
@@ -120,7 +130,6 @@ def get_yes_no_keyboard():
     keyboard.add_button('НЕТ', color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
-# --- НОВАЯ КЛАВИАТУРА ДЛЯ АНАЛИЗА ЕДЫ ---
 def get_food_confirm_keyboard():
     keyboard = VkKeyboard(one_time=True)
     keyboard.add_button('ДА', color=VkKeyboardColor.POSITIVE)
@@ -139,6 +148,27 @@ def get_mood_keyboard():
     keyboard.add_button('Хорошо', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('Нормально', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('Плохо', color=VkKeyboardColor.NEGATIVE)
+    return keyboard.get_keyboard()
+
+# --- КЛАВИАТУРЫ АДМИНА ---
+def get_admin_decision_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('✅ Принять', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('⛔ Отклонить', color=VkKeyboardColor.NEGATIVE)
+    return keyboard.get_keyboard()
+
+def get_end_chat_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('❌ Закончить диалог', color=VkKeyboardColor.NEGATIVE)
+    return keyboard.get_keyboard()
+
+def get_rating_keyboard():
+    keyboard = VkKeyboard(one_time=True)
+    keyboard.add_button('1 ⭐️', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('2 ⭐️', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('3 ⭐️', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('4 ⭐️', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('5 ⭐️', color=VkKeyboardColor.POSITIVE)
     return keyboard.get_keyboard()
 
 SURVEY_QUESTIONS = [
@@ -217,9 +247,125 @@ def vk_bot_loop():
                     raw_text = event.text.strip()
                     text_lower = raw_text.lower()
                     
+                    # ----------------------------------------------------
+                    # БЛОК 1: УПРАВЛЕНИЕ АДМИНИСТРАТОРОМ
+                    # ----------------------------------------------------
+                    if user_id == ADMIN_ID:
+                        # Если админ с кем-то общается
+                        if admin_state.get("chatting_with"):
+                            target_user = admin_state["chatting_with"]
+                            if text_lower == '❌ закончить диалог':
+                                admin_state["chatting_with"] = None
+                                users_state[target_user]["step"] = "rating_admin"
+                                send_message(ADMIN_ID, "Диалог завершен.", keyboard=VkKeyboard.get_empty_keyboard())
+                                send_message(target_user, "Диалог завершен. Пожалуйста, оцените работу администратора от 1 до 5:", keyboard=get_rating_keyboard())
+                            else:
+                                send_message(target_user, f"Админ: {raw_text}")
+                            continue
+
+                        # Если админ принимает заявку
+                        if text_lower == '✅ принять':
+                            if admin_queue:
+                                target_user = admin_queue.pop(0)
+                                admin_state["chatting_with"] = target_user
+                                
+                                if admin_stats["reviews_count"] == 0:
+                                    rating_str = "Нет оценок"
+                                else:
+                                    rating_val = admin_stats["total_score"] / admin_stats["reviews_count"]
+                                    rating_str = f"{rating_val:.1f} ⭐️"
+                                
+                                if target_user not in users_state:
+                                    users_state[target_user] = {}
+                                users_state[target_user]["step"] = "chatting_with_admin"
+                                
+                                send_message(ADMIN_ID, f"Вы начали диалог с пользователем @id{target_user}. Все ваши сообщения будут отправлены ему напрямую.", keyboard=get_end_chat_keyboard())
+                                send_message(target_user, f"Администратор Артём ({rating_str}) подключился к чату. Теперь вы можете задать свой вопрос.", keyboard=get_end_chat_keyboard())
+                            else:
+                                send_message(ADMIN_ID, "Нет активных заявок.")
+                            continue
+
+                        # Если админ отклоняет заявку
+                        if text_lower == '⛔ отклонить':
+                            if admin_queue:
+                                target_user = admin_queue.pop(0)
+                                send_message(ADMIN_ID, "Заявка отклонена.")
+                                send_message(target_user, "Администратор отклонил заявку, попробуйте связаться позже.", keyboard=get_main_keyboard(target_user))
+                                if target_user in users_state and users_state[target_user].get("step") == "wait_admin_approval":
+                                    del users_state[target_user]["step"]
+                            else:
+                                send_message(ADMIN_ID, "Нет активных заявок.")
+                            continue
+                    
+                    # ----------------------------------------------------
+                    # БЛОК 2: ПЕРЕХВАТ СОСТОЯНИЙ ПОЛЬЗОВАТЕЛЯ (ЧАТ С АДМИНАМИ И ОЦЕНКА)
+                    # ----------------------------------------------------
+                    if user_id in users_state:
+                        step = users_state[user_id].get("step")
+                        
+                        # Общение с админом
+                        if step == "chatting_with_admin":
+                            if text_lower == '❌ закончить диалог' or text_lower == '❌ отменить':
+                                admin_state["chatting_with"] = None
+                                users_state[user_id]["step"] = "rating_admin"
+                                send_message(ADMIN_ID, "Пользователь завершил диалог.", keyboard=VkKeyboard.get_empty_keyboard())
+                                send_message(user_id, "Диалог завершен. Пожалуйста, оцените работу администратора от 1 до 5:", keyboard=get_rating_keyboard())
+                            else:
+                                send_message(ADMIN_ID, f"Пользователь @id{user_id}: {raw_text}")
+                            continue
+                            
+                        # Оценка админа
+                        if step == "rating_admin":
+                            if '⭐️' in raw_text or text_lower in ['1','2','3','4','5']:
+                                try:
+                                    score = int(text_lower[0])
+                                    admin_stats["total_score"] += score
+                                    admin_stats["reviews_count"] += 1
+                                    send_message(user_id, "Спасибо за вашу оценку! Ваше мнение помогает нам стать лучше.", keyboard=get_main_keyboard(user_id))
+                                    del users_state[user_id]["step"]
+                                    send_message(ADMIN_ID, f"Пользователь @id{user_id} оценил вас на {score} ⭐️.")
+                                except:
+                                    send_message(user_id, "Пожалуйста, используйте кнопки для оценки.", keyboard=get_rating_keyboard())
+                            else:
+                                send_message(user_id, "Пожалуйста, используйте кнопки для оценки.", keyboard=get_rating_keyboard())
+                            continue
+                            
+                        # Ожидание ответа от админа
+                        if step == "wait_admin_approval":
+                            if text_lower == '❌ отменить':
+                                if user_id in admin_queue:
+                                    admin_queue.remove(user_id)
+                                del users_state[user_id]["step"]
+                                send_message(user_id, "Вы отменили вызов администратора.", keyboard=get_main_keyboard(user_id))
+                                send_message(ADMIN_ID, f"Пользователь @id{user_id} отменил заявку.")
+                            else:
+                                send_message(user_id, "Ваша заявка находится в очереди. Ожидайте ответа администратора или нажмите '❌ Отменить'.", keyboard=get_cancel_keyboard())
+                            continue
+                    
+                    # --- КНОПКА ЗАПРОСА К АДМИНУ ---
+                    if text_lower == '👨‍💻 написать админу' or text_lower == 'написать админу':
+                        if user_id not in users_db: continue
+                        if user_id in admin_queue:
+                            send_message(user_id, "Ваша заявка уже в очереди. Ожидайте ответа администратора.", keyboard=get_cancel_keyboard())
+                            continue
+                            
+                        if user_id not in users_state:
+                            users_state[user_id] = {}
+                            
+                        users_state[user_id]["step"] = "wait_admin_approval"
+                        admin_queue.append(user_id)
+                        
+                        send_message(user_id, "Заявка отправлена. Ожидайте ответа администратора.", keyboard=get_cancel_keyboard())
+                        send_message(ADMIN_ID, f"🔔 Пользователь @id{user_id} хочет связаться с вами.", keyboard=get_admin_decision_keyboard())
+                        continue
+
+                    # ----------------------------------------------------
+                    # БЛОК 3: БАЗОВЫЙ ФУНКЦИОНАЛ БОТА
+                    # ----------------------------------------------------
                     if text_lower == '❌ отменить':
                         if user_id in users_state:
-                            del users_state[user_id]
+                            if "step" in users_state[user_id]:
+                                del users_state[user_id]["step"]
                         send_message(user_id, "Действие отменено.", keyboard=get_main_keyboard(user_id) if user_id in users_db else get_registration_keyboard())
                         continue
 
@@ -249,7 +395,6 @@ def vk_bot_loop():
                                 prompt = "Посмотри на фото. Скажи, что это за еда и напиши примерную калорийность (КБЖУ). Если еду видно плохо, так и скажи и попроси прислать фото лучше."
                                 ai_answer = generate_ai_response([prompt, img])
                                 
-                                # Сохраняем ответ ИИ во временное хранилище и переходим к этапу подтверждения
                                 users_state[user_id]["last_food_analysis"] = ai_answer
                                 users_state[user_id]["step"] = "wait_food_confirm"
                                 
@@ -265,11 +410,9 @@ def vk_bot_loop():
                     if user_id in users_state:
                         step = users_state[user_id].get("step")
                         
-                        # --- ОБРАБОТКА ПОДТВЕРЖДЕНИЯ ЕДЫ ---
                         if step == "wait_food_confirm":
                             if text_lower == 'да':
                                 food_info = users_state[user_id].get("last_food_analysis", "Еда по фото")
-                                # Записываем в историю, чтобы бот учитывал это в будущем
                                 users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Прием пищи {datetime.datetime.now().strftime('%d.%m')}]: {food_info}"
                                 send_message(user_id, "Отлично! Зафиксировал этот прием пищи. Учту полученные калории при составлении следующих тренировок.", keyboard=get_main_keyboard(user_id))
                                 del users_state[user_id]
@@ -285,13 +428,11 @@ def vk_bot_loop():
                             prompt = f"Пользователь съел: '{raw_text}'. Рассчитай примерную калорийность и КБЖУ. Напиши коротко и четко."
                             ai_answer = generate_ai_response(prompt)
                             
-                            # Записываем уточненные данные в историю
                             users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Прием пищи {datetime.datetime.now().strftime('%d.%m')} (Уточнение)]: {raw_text}. Анализ: {ai_answer}"
                             
                             send_message(user_id, f"{ai_answer}\n\nСупер, я зафиксировал этот прием пищи в твою базу!", keyboard=get_main_keyboard(user_id))
                             del users_state[user_id]
                             continue
-                        # -----------------------------------
 
                         if step == "confirm_reset":
                             if text_lower == 'да':
@@ -457,7 +598,7 @@ def vk_bot_loop():
                         ДОСЬЕ: {get_user_profile_text(users_db[user_id])}
                         ИСТОРИЯ, ИТОГИ И ВОПРОСЫ ПОЛЬЗОВАТЕЛЯ (УЧТИ ЭТО ДЛЯ КОРРЕКЦИИ): {users_db[user_id].get("history", "")}
                         
-                        ВНИМАНИЕ: Обязательно учитывай ПОЛ пользователя ({users_db[user_id].get('gender')}) при подборе упражнений (например, смещение акцентов на нужные группы мышц, подходящий уровень нагрузки).
+                        ВНИМАНИЕ: Обязательно учитывай ПОЛ пользователя ({users_db[user_id].get('gender')}) при подборе упражнений.
                         
                         Выдай ответ СТРОГО в следующем формате. Пиши ОЧЕНЬ коротко.
                         
