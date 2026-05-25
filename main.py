@@ -11,6 +11,7 @@ from PIL import Image
 import os
 import sys
 import logging
+from flask import Flask  # Импортируем Flask
 
 # --- ЛОГИРОВАНИЕ ---
 logging.basicConfig(
@@ -58,6 +59,17 @@ longpoll = VkLongPoll(vk_session)
 # Хранилища (в идеале потом перевести на базу данных, например SQLite)
 users_state = {} 
 users_db = {}    
+
+# --- FLASK СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ ---
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "NEXUS Bot is alive"
+
+def run_web():
+    # Сервер слушает порт 10000 на всех интерфейсах
+    app.run(host="0.0.0.0", port=10000)
 
 # --- КЛАВИАТУРЫ ---
 def get_registration_keyboard():
@@ -276,7 +288,6 @@ def vk_bot_loop():
                             users_state[user_id]["step"] = "gender"
                             send_message(user_id, f"Отлично, {raw_text}! Укажи свой пол:", keyboard=get_gender_keyboard())
                         elif step == "gender":
-                            # Очищаем эмодзи из текста, если пользователь нажал кнопку
                             clean_gender = raw_text.replace("👨", "").replace("👩", "").strip()
                             data["gender"] = clean_gender
                             users_state[user_id]["step"] = "age"
@@ -419,8 +430,12 @@ def vk_bot_loop():
 if __name__ == "__main__":
     logging.info("NEXUS BOT STARTED")
     
-    # Фоновый поток для уведомлений о воде
+    # 1. Фоновый поток для Flask веб-сервера (запускается первым)
+    threading.Thread(target=run_web, daemon=True).start()
+    logging.info("Flask веб-сервер успешно запущен на порту 10000.")
+    
+    # 2. Фоновый поток для уведомлений о воде
     threading.Thread(target=water_reminder_loop, daemon=True).start()
     
-    # Основной поток держит LongPoll (не daemon, чтобы скрипт не завершался)
+    # 3. Основной поток держит LongPoll (не daemon, чтобы скрипт не завершался)
     vk_bot_loop()
