@@ -109,6 +109,12 @@ def get_confirm_reset_keyboard():
     keyboard.add_button('НЕТ', color=VkKeyboardColor.PRIMARY)
     return keyboard.get_keyboard()
 
+def get_yes_no_keyboard():
+    keyboard = VkKeyboard(one_time=True)
+    keyboard.add_button('ДА', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('НЕТ', color=VkKeyboardColor.NEGATIVE)
+    return keyboard.get_keyboard()
+
 def get_cancel_keyboard():
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('❌ Отменить', color=VkKeyboardColor.NEGATIVE)
@@ -122,7 +128,7 @@ def get_mood_keyboard():
     return keyboard.get_keyboard()
 
 SURVEY_QUESTIONS = [
-    "1. Выбери свою главную цель:\n1 - Убрать жир\n2 - Убрать живот\n3 - Сделать кубики пресса\n4 - Накачать руки (бицепс/трицепс)\n5 - Накачать широкую спину\n6 - Прокачать ноги и ягодицы\n7 - Улучшить выносливость\n8 - Набрать общую мышечную массу",
+    "1. Выбери свою главную цель:\n1 - Убрать жир\n2 - Убрать живот\n3 - Сделать кубики пресса\n4 - Накачать руки (бицепс/трицепс)\n5 - Накачать широкую спину\n6 - Прокачать ноги и ягодицы\n7 - Улучшить выносливость\n8 - Набрать общую мышечную массу \nЛибо же напишите свои пожелания без цифр",
     "2. Какая у тебя цель в цифрах? Сколько кг ты хочешь убрать или набрать за месяц? (Напиши число, или '0', если вес не важен)",
     "3. Где ты будешь заниматься и с чем? (В спортзале, дома без инвентаря, дома с гантелями/резинками, на уличных турниках)",
     "4. Оцени свой текущий уровень подготовки. (Новичок, любитель, профи)",
@@ -253,6 +259,30 @@ def vk_bot_loop():
                                 send_message(user_id, "Нажми 'ДА' или 'НЕТ'.", keyboard=get_confirm_reset_keyboard())
                             continue
 
+                        # --- ОБРАБОТКА УТОЧНЕНИЙ НОВОГО ДНЯ ---
+                        if step == "wait_day_clarification":
+                            if text_lower == 'нет':
+                                send_message(user_id, "Отлично! Хорошего дня!", keyboard=get_main_keyboard(user_id))
+                                del users_state[user_id]
+                            elif text_lower == 'да':
+                                users_state[user_id]["step"] = "wait_day_clarification_text"
+                                send_message(user_id, "Напишите ваши уточнения (например, каких продуктов нет дома, есть ли мало времени и т.д.):", keyboard=get_cancel_keyboard())
+                            else:
+                                send_message(user_id, "Пожалуйста, используйте кнопки 'ДА' или 'НЕТ'.", keyboard=get_yes_no_keyboard())
+                            continue
+                            
+                        if step == "wait_day_clarification_text":
+                            users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Уточнение плана от {datetime.datetime.now().strftime('%d.%m')}]: {raw_text}"
+                            send_message(user_id, "Нейросеть NEXUS перестраивает план с учетом твоих пожеланий...")
+                            
+                            prompt = f"Пользователь внес уточнения в текущий план на сегодня: '{raw_text}'. ДОСЬЕ: {get_user_profile_text(users_db[user_id])}. Скорректируй план питания или тренировок, чтобы он подходил под новые условия пользователя. Напиши обновленные рекомендации кратко и по делу."
+                            ai_answer = generate_ai_response(prompt)
+                            
+                            send_message(user_id, ai_answer, keyboard=get_main_keyboard(user_id))
+                            del users_state[user_id]
+                            continue
+                        # ----------------------------------------
+
                         if step == "wait_trainer_msg":
                             users_db[user_id]["history"] = users_db[user_id].get("history", "") + f"\n[Сообщение тренеру от {datetime.datetime.now().strftime('%d.%m')}]: {raw_text}"
                             send_message(user_id, "Анализирую твое сообщение...")
@@ -282,7 +312,6 @@ def vk_bot_loop():
 
                         data = users_state[user_id].get("data", {})
                         
-                        # --- ОБНОВЛЕННАЯ ЦЕПОЧКА РЕГИСТРАЦИИ ---
                         if step == "name":
                             data["name"] = raw_text
                             users_state[user_id]["step"] = "gender"
@@ -304,7 +333,6 @@ def vk_bot_loop():
                             data["weight"] = raw_text
                             users_state[user_id]["step"] = "q_0"
                             send_message(user_id, "Супер. Перейдем к целям.\n\n" + SURVEY_QUESTIONS[0], keyboard=get_registration_keyboard())
-                        # ----------------------------------------
                         
                         elif step.startswith("q_"):
                             q_index = int(step.split("_")[1])
@@ -412,8 +440,16 @@ def vk_bot_loop():
                         Удачи!
                         """
                         response_text = generate_ai_response(daily_prompt)
-                        send_message(user_id, response_text, keyboard=get_main_keyboard(user_id))
+                        
+                        # --- ОБНОВЛЕНИЕ ЗДЕСЬ: Отправляем план, а затем спрашиваем про уточнения ---
+                        send_message(user_id, response_text) # Отправили сгенерированный план без клавиатуры
+                        
+                        # Спрашиваем, нужны ли изменения
+                        question_msg = "Хотите уточнить что-нибудь? (Нет определённых продуктов? Напишите что у вас есть и я распишу как сбалансированно распределить пищу!)"
+                        users_state[user_id] = {"step": "wait_day_clarification"}
+                        send_message(user_id, question_msg, keyboard=get_yes_no_keyboard())
                         continue
+                        # --------------------------------------------------------------------------
 
                     if user_id in users_db:
                         send_message(user_id, "Используй кнопки меню ниже!", keyboard=get_main_keyboard(user_id))
@@ -430,12 +466,9 @@ def vk_bot_loop():
 if __name__ == "__main__":
     logging.info("NEXUS BOT STARTED")
     
-    # 1. Фоновый поток для Flask веб-сервера (запускается первым)
     threading.Thread(target=run_web, daemon=True).start()
-    logging.info("Flask веб-сервер успешно запущен на порту 10000.")
+    logging.info("Flask веб-сервер успешно запущен.")
     
-    # 2. Фоновый поток для уведомлений о воде
     threading.Thread(target=water_reminder_loop, daemon=True).start()
     
-    # 3. Основной поток держит LongPoll (не daemon, чтобы скрипт не завершался)
     vk_bot_loop()
