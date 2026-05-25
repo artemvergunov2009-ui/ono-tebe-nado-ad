@@ -2,3 +2,5 @@ vk_api
 google-generativeai
 requests
 Pillow
+flask
+gunicorn
